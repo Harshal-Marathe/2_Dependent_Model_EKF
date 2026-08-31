@@ -225,6 +225,54 @@ def render_tab5(nevergrad_available: bool):
                         f"cross-intercept coupling ({_coupling_note_2}): φ₁ (Dep2→Dep1) = **{results_2['phi1']:.3f}**, "
                         f"φ₂ (Dep1→Dep2) = **{results_2['phi2']:.3f}**"
                     )
+
+                    # ── Joint objective formula + numeric breakdown ──────
+                    # Loss(Θ) = EKF NLL + λ·NRMSE regularization (see
+                    # modules/kalman.py::joint_composite_loss). Shown here
+                    # so the actual objective being optimized — not just
+                    # the resulting log-lik — is visible on this page.
+                    st.markdown("##### Joint objective being optimized")
+                    st.latex(
+                        r"""
+                        \text{Loss}(\Theta) = \underbrace{\frac{1}{2}\sum_{t=1}^{T}
+                        \Big(\log|\mathbf{F}_t| + \mathbf{v}_t^{T}\mathbf{F}_t^{-1}\mathbf{v}_t\Big)}
+                        _{\text{EKF Negative Log-Likelihood (NLL)}}
+                        \;+\; \lambda\underbrace{\left(\frac{\text{RMSE}_{\text{dep1}}}{\bar y_{\text{dep1}}}
+                        + \frac{\text{RMSE}_{\text{dep2}}}{\bar y_{\text{dep2}}}\right)}
+                        _{\text{NRMSE Regularization}}
+                        """
+                    )
+                    with st.expander("📐 Loss breakdown for this fit"):
+                        lam    = results_2.get("lambda_reg")
+                        nrmse  = results_2.get("nrmse_reg")
+                        rmse_1 = results_2.get("rmse_dep1")
+                        rmse_2 = results_2.get("rmse_dep2")
+                        nll    = -results_2.get("joint_loglik", 0.0)
+
+                        if lam is not None:
+                            e1, e2, e3 = st.columns(3)
+                            e1.metric("NLL term", f"{nll:.2f}")
+                            e2.metric("λ (auto-scaled)", f"{lam:.4g}")
+                            e3.metric("NRMSE term (λ·NRMSE)", f"{lam * nrmse:.2f}")
+
+                            f1, f2 = st.columns(2)
+                            f1.metric(f"RMSE · {config['target']}", f"{rmse_1:.4g}")
+                            f2.metric(f"RMSE · {config.get('target2')}", f"{rmse_2:.4g}")
+
+                            st.caption(
+                                "λ was fixed once at θ₀ (the optimizer's starting point) so the "
+                                "NLL and NRMSE terms contribute comparably to the loss at the "
+                                "start of the search — it is NOT re-estimated every iteration. "
+                                "NLL and NRMSE above are both evaluated on the **full** dataset "
+                                "with the final fitted parameters (train+test), for diagnostics; "
+                                "the optimizer itself only ever saw the train-window version "
+                                "of this loss."
+                            )
+                        else:
+                            st.caption(
+                                "Regularization diagnostics not found on this result — "
+                                "re-run the model to populate them."
+                            )
             except Exception as e:
                 st.exception(e)
 
