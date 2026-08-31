@@ -16,7 +16,7 @@ _defaults = {
     "model_fitted_2": False,
     "refit_config": None,      # working config for Tab 8 · Refine & Refit (starts as a copy of config)
     "refit_result": None,      # latest refit result dict (starts as the Tab 6 fit)
-    "refit_history": [],       # log of refit steps: [{Step, Action, Variable, MAPE, R2}, ...]
+    "refit_history": [],       # log of refit steps: [{Step, Action, Variable, MAPE, R2, Gelman R2}, ...]
     "refit_last_message": None,  # stashed success toast, shown once after the forced rerun in Tab 8
     "_last_uploaded_file_id": None,  # (name, size) of last processed upload — see tab1
 

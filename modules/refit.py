@@ -458,7 +458,7 @@ def run_refit_pipeline(df_full, new_config, prev_result, max_iter, method,
     adstocked_media = _precompute_adstocked(df_full, g_new, params)
     result = _postprocess_equation(
         df_full, g_new, params, x_smooth, adstocked_media, cross_beta_contrib,
-        opt_success, opt_nit, loglik,
+        opt_success, opt_nit, loglik, n_train=n_train,
     )
     result["P_smooth"] = P_smooth
     return result

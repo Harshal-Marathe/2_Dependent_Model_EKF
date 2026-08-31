@@ -43,6 +43,7 @@ def _render_tab7_promote_section():
         st.markdown("### 🔧 Refined Model Available (from Tab 8 · Refine & Refit)")
         base_mape = st.session_state.model_results["mape"]
         base_r2   = st.session_state.model_results["r2"]
+        base_r2_g = st.session_state.model_results["r2_gelman"]
         dc1, dc2, dc3, dc4 = st.columns(4)
         dc1.metric("Tab 6 baseline MAPE", f"{base_mape:.2%}")
         dc2.metric("Refined MAPE", f"{refit_result['mape']:.2%}",
@@ -50,6 +51,10 @@ def _render_tab7_promote_section():
         dc3.metric("Tab 6 baseline R²", f"{base_r2:.4f}")
         dc4.metric("Refined R²", f"{refit_result['r2']:.4f}",
                    delta=f"{refit_result['r2']-base_r2:+.4f}")
+        dc5, dc6 = st.columns(2)
+        dc5.metric("Tab 6 baseline Gelman R²", f"{base_r2_g:.4f}")
+        dc6.metric("Refined Gelman R²", f"{refit_result['r2_gelman']:.4f}",
+                   delta=f"{refit_result['r2_gelman']-base_r2_g:+.4f}")
         st.caption(f"{steps_taken} refinement step(s) taken in Tab 8.")
 
         if already_saved:
@@ -458,11 +463,35 @@ def render_full_results(df, config, res, target, key_prefix="", pcb_key="per_cha
     kp = key_prefix
 
     st.markdown("### A · Model Performance")
-    c1, c2, c3, c4 = st.columns(4)
+    c1, c2, c3, c4, c5 = st.columns(5)
     c1.metric("MAPE",         f"{res['mape']:.2%}")
     c2.metric("R²",           f"{res['r2']:.4f}")
-    c3.metric("Log-Lik",      f"{res['loglik']:.2f}")
-    c4.metric("Observations", len(df))
+    c3.metric("Gelman R²",    f"{res['r2_gelman']:.4f}")
+    c4.metric("Log-Lik",      f"{res['loglik']:.2f}")
+    c5.metric("Observations", len(df))
+
+    n_test = res.get("n_test", 0)
+    if n_test and n_test > 0:
+        st.markdown("###### In-Sample (Train) vs. Out-of-Sample (Test) Accuracy")
+        ic1, ic2, ic3, ic4 = st.columns(4)
+        ic1.metric("Train MAPE",       f"{res['mape_in']:.2%}")
+        ic2.metric("Train R²",         f"{res['r2_in']:.4f}")
+        ic3.metric("Test MAPE",        f"{res['mape_out']:.2%}",
+                   delta=f"{(res['mape_out']-res['mape_in'])*100:+.2f} pp vs train",
+                   delta_color="inverse")
+        ic4.metric("Test R²",          f"{res['r2_out']:.4f}",
+                   delta=f"{res['r2_out']-res['r2_in']:+.4f} vs train")
+        jc1, jc2, jc3 = st.columns(3)
+        jc1.metric("Train Gelman R²",  f"{res['r2_gelman_in']:.4f}")
+        jc2.metric("Test Gelman R²",   f"{res['r2_gelman_out']:.4f}",
+                   delta=f"{res['r2_gelman_out']-res['r2_gelman_in']:+.4f} vs train")
+        jc3.metric("Train / Test obs", f"{res['n_train']} / {n_test}")
+        st.caption("A much larger gap between train and test metrics is a sign of overfitting.")
+    else:
+        st.caption(
+            "No holdout/test period configured — the metrics above are in-sample "
+            "(fit) only. Set a train/test split in Tab 5 to see out-of-sample accuracy."
+        )
 
     st.markdown("### B · Actual vs Predicted")
     x_axis  = np.arange(len(df)); n_train = config["n_train"]

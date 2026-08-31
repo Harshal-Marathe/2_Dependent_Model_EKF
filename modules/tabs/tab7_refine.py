@@ -33,6 +33,7 @@ def _init_refit_state():
             "Step": 0, "Action": "Baseline (Tab 6 fit)", "Variable": "—",
             "MAPE": st.session_state.model_results["mape"],
             "R²": st.session_state.model_results["r2"],
+            "Gelman R²": st.session_state.model_results["r2_gelman"],
         }]
 
 
@@ -43,6 +44,7 @@ def _reset_refit_state():
         "Step": 0, "Action": "Baseline (Tab 6 fit)", "Variable": "—",
         "MAPE": st.session_state.model_results["mape"],
         "R²": st.session_state.model_results["r2"],
+        "Gelman R²": st.session_state.model_results["r2_gelman"],
     }]
 
 
@@ -87,6 +89,7 @@ def _run_and_record(df, new_config, action_label, var_label, unfreeze_cols,
         "Step": len(st.session_state.refit_history),
         "Action": action_label, "Variable": var_label,
         "MAPE": result["mape"], "R²": result["r2"],
+        "Gelman R²": result["r2_gelman"],
     })
     # The results panel (Actual vs Predicted / Contributions) is rendered
     # further up the script than these buttons, so within a single script
@@ -94,7 +97,8 @@ def _run_and_record(df, new_config, action_label, var_label, unfreeze_cols,
     # and force a full rerun so the whole page redraws top-to-bottom with
     # the fresh refit_result already in session state.
     st.session_state.refit_last_message = (
-        f"✅ Refit complete — MAPE {result['mape']:.2%} · R² {result['r2']:.4f}"
+        f"✅ Refit complete — MAPE {result['mape']:.2%} · R² {result['r2']:.4f} · "
+        f"Gelman R² {result['r2_gelman']:.4f}"
     )
     st.rerun()
 
@@ -141,11 +145,12 @@ def render_tab7():
 
     # ── Baseline status ─────────────────────────────────────────────
     st.markdown(f"### Current Working Model · `{target}`")
-    c1, c2, c3, c4 = st.columns(4)
+    c1, c2, c3, c4, c5 = st.columns(5)
     c1.metric("MAPE", f"{refit_result['mape']:.2%}")
     c2.metric("R²", f"{refit_result['r2']:.4f}")
-    c3.metric("Log-Lik", f"{refit_result['loglik']:.2f}")
-    c4.metric("Refit steps taken", len(st.session_state.refit_history) - 1)
+    c3.metric("Gelman R²", f"{refit_result['r2_gelman']:.4f}")
+    c4.metric("Log-Lik", f"{refit_result['loglik']:.2f}")
+    c5.metric("Refit steps taken", len(st.session_state.refit_history) - 1)
 
     with st.expander("📜 Refinement history", expanded=False):
         hist_df = pd.DataFrame(st.session_state.refit_history)

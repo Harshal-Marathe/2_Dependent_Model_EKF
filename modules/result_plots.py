@@ -59,10 +59,37 @@ def render_fit_and_contrib(df, config, res, target, key_prefix=""):
     target   : the dependent-variable column name in df
     key_prefix: unique prefix so widget/chart keys don't collide across calls
     """
-    c1, c2, c3 = st.columns(3)
+    c1, c2, c3, c4 = st.columns(4)
     c1.metric("MAPE", f"{res['mape']:.2%}")
     c2.metric("R²", f"{res['r2']:.4f}")
-    c3.metric("Log-Lik", f"{res['loglik']:.2f}")
+    c3.metric("Gelman R²", f"{res['r2_gelman']:.4f}")
+    c4.metric("Log-Lik", f"{res['loglik']:.2f}")
+
+    st.markdown("##### In-Sample vs. Out-of-Sample Accuracy")
+    n_test = res.get("n_test", 0)
+    if n_test and n_test > 0:
+        ic1, ic2, ic3, ic4 = st.columns(4)
+        ic1.metric("In-Sample MAPE (Train)", f"{res['mape_in']:.2%}")
+        ic2.metric("In-Sample R² (Train)", f"{res['r2_in']:.4f}")
+        ic3.metric("Out-of-Sample MAPE (Test)", f"{res['mape_out']:.2%}",
+                   delta=f"{(res['mape_out']-res['mape_in'])*100:+.2f} pp vs train",
+                   delta_color="inverse")
+        ic4.metric("Out-of-Sample R² (Test)", f"{res['r2_out']:.4f}",
+                   delta=f"{res['r2_out']-res['r2_in']:+.4f} vs train")
+        jc1, jc2 = st.columns(2)
+        jc1.metric("In-Sample Gelman R² (Train)", f"{res['r2_gelman_in']:.4f}")
+        jc2.metric("Out-of-Sample Gelman R² (Test)", f"{res['r2_gelman_out']:.4f}",
+                   delta=f"{res['r2_gelman_out']-res['r2_gelman_in']:+.4f} vs train")
+        st.caption(
+            f"Train: {res['n_train']} obs · Test (holdout): {n_test} obs. "
+            "A much larger gap between train and test metrics is a sign of overfitting."
+        )
+    else:
+        st.caption(
+            "No holdout/test period configured — all figures above are in-sample "
+            "(fit) metrics only. Set a train/test split (Tab 5) to see genuine "
+            "out-of-sample accuracy."
+        )
 
     st.markdown("##### Actual vs Predicted")
     n_train = config.get("n_train")

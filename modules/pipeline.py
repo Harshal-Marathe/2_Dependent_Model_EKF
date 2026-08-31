@@ -32,7 +32,8 @@ from modules.metrics import safe_mape
 # ── Shared post-processing (contributions / ROI / parameter tables) ─────────
 
 def _postprocess_equation(df_full, g, params, x_smooth, adstocked_media,
-                           cross_beta_contrib, opt_success, opt_nit, loglik):
+                           cross_beta_contrib, opt_success, opt_nit, loglik,
+                           n_train=None):
     """
     Given a fitted/smoothed state trajectory for ONE equation (one
     dependent variable), builds: smoothed yhat, MAPE/R2, the contribution
@@ -95,6 +96,47 @@ def _postprocess_equation(df_full, g, params, x_smooth, adstocked_media,
     mape  = safe_mape(resid_smooth, target_vals)
     ss_res = np.sum(resid_smooth**2); ss_tot = np.sum((target_vals - target_vals.mean())**2)
     r2    = 1.0 - ss_res / (ss_tot + 1e-12)
+    # Gelman R² (Bayesian R², Gelman et al. 2018) — point-estimate version:
+    # ratio of explained variance to explained + residual variance, using
+    # the final smoothed fit. Bounded in [0, 1] by construction, which makes
+    # it more robust than classical R² for this regularized/state-space fit.
+    var_yhat_g  = np.var(yhat_smooth, ddof=1)
+    var_resid_g = np.var(resid_smooth, ddof=1)
+    r2_gelman   = var_yhat_g / (var_yhat_g + var_resid_g + 1e-12)
+
+    # ── In-sample (train) vs. out-of-sample (test/holdout) accuracy ──────
+    # The optimizer only ever sees df_train (rows [:n_train]); the smoother
+    # above runs over df_full, so everything from n_train onward is a
+    # genuine out-of-sample forecast check, not just a fitted residual.
+    # Each split's MAPE/R²/Gelman-R² is computed the same way as the
+    # full-sample versions above, just restricted to that slice's own rows
+    # (and, for R², its own mean as the "no model" baseline).
+    def _slice_metrics(idx_slice):
+        n_pts = idx_slice.stop - idx_slice.start if isinstance(idx_slice, slice) else None
+        if n_pts is not None and n_pts <= 0:
+            return {"mape": np.nan, "r2": np.nan, "r2_gelman": np.nan, "n": 0}
+        y_s    = target_vals[idx_slice]
+        yhat_s = yhat_smooth[idx_slice]
+        res_s  = resid_smooth[idx_slice]
+        mape_s = safe_mape(res_s, y_s)
+        sst_s  = np.sum((y_s - y_s.mean())**2)
+        r2_s   = 1.0 - np.sum(res_s**2) / (sst_s + 1e-12)
+        if len(y_s) > 1:
+            vy_s = np.var(yhat_s, ddof=1); vr_s = np.var(res_s, ddof=1)
+            r2g_s = vy_s / (vy_s + vr_s + 1e-12)
+        else:
+            r2g_s = np.nan
+        return {"mape": mape_s, "r2": r2_s, "r2_gelman": r2g_s, "n": len(y_s)}
+
+    n_total = len(df_full)
+    if n_train is not None and 0 < n_train <= n_total:
+        in_metrics  = _slice_metrics(slice(0, n_train))
+        out_metrics = _slice_metrics(slice(n_train, n_total)) if n_train < n_total else \
+            {"mape": np.nan, "r2": np.nan, "r2_gelman": np.nan, "n": 0}
+    else:
+        # No train/test split info available — treat everything as in-sample.
+        in_metrics  = _slice_metrics(slice(0, n_total))
+        out_metrics = {"mape": np.nan, "r2": np.nan, "r2_gelman": np.nan, "n": 0}
 
     contrib_df = df_full[[TARGET_COL]].copy()
 
@@ -316,7 +358,10 @@ def _postprocess_equation(df_full, g, params, x_smooth, adstocked_media,
         "params":params,"yhat_smooth":yhat_smooth,"residuals":resid_smooth,
         "x_smooth":x_smooth,"adstocked_media":adstocked_media,
         "contrib_df":contrib_df,"roi_df":roi_df,"param_df":param_df,"synergy_df":synergy_df,
-        "loglik":loglik,"mape":mape,"r2":r2,
+        "loglik":loglik,"mape":mape,"r2":r2,"r2_gelman":r2_gelman,
+        "n_train":n_train, "n_test": (n_total - n_train) if n_train is not None else 0,
+        "mape_in":in_metrics["mape"], "r2_in":in_metrics["r2"], "r2_gelman_in":in_metrics["r2_gelman"],
+        "mape_out":out_metrics["mape"], "r2_out":out_metrics["r2"], "r2_gelman_out":out_metrics["r2_gelman"],
         "success":opt_success,"nit":opt_nit,"g":g,
     }
 
@@ -368,7 +413,7 @@ def run_full_ekf_pipeline(df_full, config, max_iter, method, ng_cfg=None):
     adstocked_media = _precompute_adstocked(df_full, g, params)
     result = _postprocess_equation(
         df_full, g, params, x_smooth, adstocked_media, cross_beta_contrib,
-        opt_success, opt_nit, loglik,
+        opt_success, opt_nit, loglik, n_train=n_train,
     )
     result["P_smooth"] = P_smooth
     return result
@@ -606,11 +651,11 @@ def run_multi_dependent_pipeline(df_full, config, max_iter, method, ng_cfg=None)
 
     results_1 = _postprocess_equation(
         df_full, g1, params1, x_smooth_1, adstocked_media_1, cross1,
-        opt_success, opt_nit, joint_loglik,
+        opt_success, opt_nit, joint_loglik, n_train=n_train,
     )
     results_2 = _postprocess_equation(
         df_full, g2, params2, x_smooth_2, adstocked_media_2, cross2,
-        opt_success, opt_nit, joint_loglik,
+        opt_success, opt_nit, joint_loglik, n_train=n_train,
     )
 
     for res in (results_1, results_2):
