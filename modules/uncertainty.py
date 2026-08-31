@@ -262,6 +262,7 @@ def run_seed_stability(df_full, config, max_iter, method, n_seeds=5,
         roi["seed"] = s
         seed_rois.append(roi)
         seed_metrics.append({"seed": s, "mape": res["mape"], "r2": res["r2"],
+                              "r2_gelman": res["r2_gelman"],
                               "loglik": res["loglik"], "success": res["success"]})
         if progress_cb:
             progress_cb(s + 1, n_seeds)

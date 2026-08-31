@@ -95,6 +95,13 @@ def _postprocess_equation(df_full, g, params, x_smooth, adstocked_media,
     mape  = safe_mape(resid_smooth, target_vals)
     ss_res = np.sum(resid_smooth**2); ss_tot = np.sum((target_vals - target_vals.mean())**2)
     r2    = 1.0 - ss_res / (ss_tot + 1e-12)
+    # Gelman R² (Bayesian R², Gelman et al. 2018) — point-estimate version:
+    # ratio of explained variance to explained + residual variance, using
+    # the final smoothed fit. Bounded in [0, 1] by construction, which makes
+    # it more robust than classical R² for this regularized/state-space fit.
+    var_yhat_g  = np.var(yhat_smooth, ddof=1)
+    var_resid_g = np.var(resid_smooth, ddof=1)
+    r2_gelman   = var_yhat_g / (var_yhat_g + var_resid_g + 1e-12)
 
     contrib_df = df_full[[TARGET_COL]].copy()
 
@@ -316,7 +323,7 @@ def _postprocess_equation(df_full, g, params, x_smooth, adstocked_media,
         "params":params,"yhat_smooth":yhat_smooth,"residuals":resid_smooth,
         "x_smooth":x_smooth,"adstocked_media":adstocked_media,
         "contrib_df":contrib_df,"roi_df":roi_df,"param_df":param_df,"synergy_df":synergy_df,
-        "loglik":loglik,"mape":mape,"r2":r2,
+        "loglik":loglik,"mape":mape,"r2":r2,"r2_gelman":r2_gelman,
         "success":opt_success,"nit":opt_nit,"g":g,
     }
 

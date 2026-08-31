@@ -43,6 +43,7 @@ def _render_tab7_promote_section():
         st.markdown("### 🔧 Refined Model Available (from Tab 8 · Refine & Refit)")
         base_mape = st.session_state.model_results["mape"]
         base_r2   = st.session_state.model_results["r2"]
+        base_r2_g = st.session_state.model_results["r2_gelman"]
         dc1, dc2, dc3, dc4 = st.columns(4)
         dc1.metric("Tab 6 baseline MAPE", f"{base_mape:.2%}")
         dc2.metric("Refined MAPE", f"{refit_result['mape']:.2%}",
@@ -50,6 +51,10 @@ def _render_tab7_promote_section():
         dc3.metric("Tab 6 baseline R²", f"{base_r2:.4f}")
         dc4.metric("Refined R²", f"{refit_result['r2']:.4f}",
                    delta=f"{refit_result['r2']-base_r2:+.4f}")
+        dc5, dc6 = st.columns(2)
+        dc5.metric("Tab 6 baseline Gelman R²", f"{base_r2_g:.4f}")
+        dc6.metric("Refined Gelman R²", f"{refit_result['r2_gelman']:.4f}",
+                   delta=f"{refit_result['r2_gelman']-base_r2_g:+.4f}")
         st.caption(f"{steps_taken} refinement step(s) taken in Tab 8.")
 
         if already_saved:
@@ -458,11 +463,12 @@ def render_full_results(df, config, res, target, key_prefix="", pcb_key="per_cha
     kp = key_prefix
 
     st.markdown("### A · Model Performance")
-    c1, c2, c3, c4 = st.columns(4)
+    c1, c2, c3, c4, c5 = st.columns(5)
     c1.metric("MAPE",         f"{res['mape']:.2%}")
     c2.metric("R²",           f"{res['r2']:.4f}")
-    c3.metric("Log-Lik",      f"{res['loglik']:.2f}")
-    c4.metric("Observations", len(df))
+    c3.metric("Gelman R²",    f"{res['r2_gelman']:.4f}")
+    c4.metric("Log-Lik",      f"{res['loglik']:.2f}")
+    c5.metric("Observations", len(df))
 
     st.markdown("### B · Actual vs Predicted")
     x_axis  = np.arange(len(df)); n_train = config["n_train"]

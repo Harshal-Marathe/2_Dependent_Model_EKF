@@ -181,19 +181,21 @@ def render_tab5(nevergrad_available: bool):
 
                 st.success("✅ Model fitted!")
                 st.markdown(f"#### Dependent 1 · `{config['target']}`")
-                c1, c2, c3, c4 = st.columns(4)
+                c1, c2, c3, c4, c5 = st.columns(5)
                 c1.metric("MAPE",      f"{results_1['mape']:.2%}")
                 c2.metric("R²",        f"{results_1['r2']:.4f}")
-                c3.metric("Log-Lik",   f"{results_1['loglik']:.1f}")
-                c4.metric("Converged", "Yes ✅" if results_1["success"] else "Partial ⚠️")
+                c3.metric("Gelman R²", f"{results_1['r2_gelman']:.4f}")
+                c4.metric("Log-Lik",   f"{results_1['loglik']:.1f}")
+                c5.metric("Converged", "Yes ✅" if results_1["success"] else "Partial ⚠️")
 
                 if results_2 is not None and chained_mode:
                     st.markdown(f"#### Dependent 2 · `{config.get('target2')}` (fitted independently)")
-                    d1, d2, d3, d4 = st.columns(4)
+                    d1, d2, d3, d4, d5 = st.columns(5)
                     d1.metric("MAPE",      f"{results_2['mape']:.2%}")
                     d2.metric("R²",        f"{results_2['r2']:.4f}")
-                    d3.metric("Log-Lik",   f"{results_2['loglik']:.1f}")
-                    d4.metric("Converged", "Yes ✅" if results_2["success"] else "Partial ⚠️")
+                    d3.metric("Gelman R²", f"{results_2['r2_gelman']:.4f}")
+                    d4.metric("Log-Lik",   f"{results_2['loglik']:.1f}")
+                    d5.metric("Converged", "Yes ✅" if results_2["success"] else "Partial ⚠️")
                     st.info(
                         f"➡️ **Chained into Dependent 1**: `{results_1['chain_driver_col']}` "
                         f"({'fitted' if results_1['chain_use_fitted'] else 'raw actual'} values of "
@@ -204,11 +206,12 @@ def render_tab5(nevergrad_available: bool):
                     )
                 elif results_2 is not None:
                     st.markdown(f"#### Dependent 2 · `{config.get('target2')}` (joint bivariate fit)")
-                    d1, d2, d3, d4 = st.columns(4)
+                    d1, d2, d3, d4, d5 = st.columns(5)
                     d1.metric("MAPE",      f"{results_2['mape']:.2%}")
                     d2.metric("R²",        f"{results_2['r2']:.4f}")
-                    d3.metric("Log-Lik",   f"{results_2['loglik']:.1f}")
-                    d4.metric("Converged", "Yes ✅" if results_2["success"] else "Partial ⚠️")
+                    d3.metric("Gelman R²", f"{results_2['r2_gelman']:.4f}")
+                    d4.metric("Log-Lik",   f"{results_2['loglik']:.1f}")
+                    d5.metric("Converged", "Yes ✅" if results_2["success"] else "Partial ⚠️")
                     _coupling_mode_2 = results_2.get("cross_intercept_coupling_mode", "both")
                     _coupling_note_2 = {
                         "both": "both directions",
@@ -228,19 +231,21 @@ def render_tab5(nevergrad_available: bool):
     if st.session_state.model_fitted:
         res = st.session_state.model_results; st.divider()
         st.markdown(f"**Dependent 1 · `{config['target']}`**")
-        c1, c2, c3 = st.columns(3)
+        c1, c2, c3, c4 = st.columns(4)
         c1.metric("MAPE", f"{res['mape']:.2%}")
         c2.metric("R²",   f"{res['r2']:.4f}")
-        c3.metric("Log-Lik", f"{res['loglik']:.2f}")
+        c3.metric("Gelman R²", f"{res['r2_gelman']:.4f}")
+        c4.metric("Log-Lik", f"{res['loglik']:.2f}")
 
         if st.session_state.get("model_fitted_2") and st.session_state.get("model_results_2"):
             res2 = st.session_state.model_results_2
             mode_label = "fitted independently" if res2.get("chained_into_dep1") else "joint bivariate fit"
             st.markdown(f"**Dependent 2 · `{config.get('target2')}`** ({mode_label})")
-            e1, e2, e3 = st.columns(3)
+            e1, e2, e3, e4 = st.columns(4)
             e1.metric("MAPE", f"{res2['mape']:.2%}")
             e2.metric("R²",   f"{res2['r2']:.4f}")
-            e3.metric("Log-Lik", f"{res2['loglik']:.2f}")
+            e3.metric("Gelman R²", f"{res2['r2_gelman']:.4f}")
+            e4.metric("Log-Lik", f"{res2['loglik']:.2f}")
             if res2.get("joint_fit"):
                 _coupling_mode_disp = res2.get("cross_intercept_coupling_mode", "both")
                 _coupling_note_disp = {

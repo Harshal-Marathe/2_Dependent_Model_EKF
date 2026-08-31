@@ -59,10 +59,11 @@ def render_fit_and_contrib(df, config, res, target, key_prefix=""):
     target   : the dependent-variable column name in df
     key_prefix: unique prefix so widget/chart keys don't collide across calls
     """
-    c1, c2, c3 = st.columns(3)
+    c1, c2, c3, c4 = st.columns(4)
     c1.metric("MAPE", f"{res['mape']:.2%}")
     c2.metric("R²", f"{res['r2']:.4f}")
-    c3.metric("Log-Lik", f"{res['loglik']:.2f}")
+    c3.metric("Gelman R²", f"{res['r2_gelman']:.4f}")
+    c4.metric("Log-Lik", f"{res['loglik']:.2f}")
 
     st.markdown("##### Actual vs Predicted")
     n_train = config.get("n_train")
