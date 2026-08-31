@@ -817,6 +817,54 @@ def run_bivariate_kalman_filter(df, params1, g1, params2, g2, rho, phi1=0.0, phi
             cross1, cross2, loglik, dim1, dim2)
 
 
+# ── Joint composite loss: EKF NLL + λ·NRMSE regularization ──────────────────
+#
+#   Loss(Θ) = (1/2)·Σ_t (log|F_t| + v_t' F_t^-1 v_t)
+#             + λ·( RMSE_sales/ȳ_sales + RMSE_visits/ȳ_visits )
+#
+# The first term is exactly `-loglik` from run_bivariate_kalman_filter
+# above (that function's `loglik` already accumulates
+# -0.5*(2*log(2*pi) + logdet + quad) per step — the extra 2*log(2*pi)
+# constant per step doesn't depend on Θ, so it doesn't change where the
+# optimum sits, it only offsets the reported log-lik value by a constant).
+# The second term penalizes scale-normalized RMSE on BOTH dependent
+# variables jointly, so the optimizer can't trade one equation's fit for
+# the other's.
+
+def compute_joint_nrmse(residuals, df, g1, g2):
+    """NRMSE regularization term: RMSE_1/ȳ_1 + RMSE_2/ȳ_2.
+
+    `residuals` is the (T, 2) array returned by run_bivariate_kalman_filter
+    (column 0 = dependent 1, column 1 = dependent 2). ȳ_i is that
+    dependent's own observed mean over `df` (guarded away from 0 for
+    near-zero-mean series).
+    """
+    rmse1 = float(np.sqrt(np.mean(residuals[:, 0] ** 2)))
+    rmse2 = float(np.sqrt(np.mean(residuals[:, 1] ** 2)))
+    ybar1 = float(df[g1["TARGET_COL"]].mean())
+    ybar2 = float(df[g2["TARGET_COL"]].mean())
+    ybar1 = ybar1 if abs(ybar1) > 1e-8 else 1e-8
+    ybar2 = ybar2 if abs(ybar2) > 1e-8 else 1e-8
+    nrmse = rmse1 / abs(ybar1) + rmse2 / abs(ybar2)
+    return nrmse, rmse1, rmse2
+
+
+def joint_composite_loss(df, p1, g1, p2, g2, rho, phi1, phi2, lambda_reg,
+                          static_cache1=None, static_cache2=None):
+    """EKF NLL + λ·NRMSE, evaluated on `df` at the given joint parameters.
+
+    Returns (loss, nll, nrmse, rmse1, rmse2) — the pieces are all handed
+    back too so callers can log/inspect them without recomputing.
+    """
+    (_, residuals, _, _, _, _, _, _, _, loglik, _, _) = run_bivariate_kalman_filter(
+        df, p1, g1, p2, g2, rho, phi1, phi2,
+        static_cache1=static_cache1, static_cache2=static_cache2)
+    nll = -loglik
+    nrmse, rmse1, rmse2 = compute_joint_nrmse(residuals, df, g1, g2)
+    loss = nll + lambda_reg * nrmse
+    return loss, nll, nrmse, rmse1, rmse2
+
+
 def rts_smoother(x_filt, P_filt, x_pred, P_pred, Tmat):
     """Dimension-agnostic RTS smoother — used as-is for both the
     single-equation state and the joint (dim_1+dim_2) bivariate state."""

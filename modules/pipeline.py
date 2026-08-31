@@ -24,6 +24,7 @@ from modules.optimizer import run_nevergrad_optimizer, run_nevergrad_optimizer_j
 from modules.kalman import (
     run_kalman_filter, run_bivariate_kalman_filter, rts_smoother,
     _precompute_adstocked, _build_observation_matrix, build_static_cache,
+    joint_composite_loss, compute_joint_nrmse,
 )
 from modules.transforms import apply_transformation, hill_transform_vec
 from modules.metrics import safe_mape
@@ -586,10 +587,26 @@ def run_multi_dependent_pipeline(df_full, config, max_iter, method, ng_cfg=None)
     static_cache1_train = build_static_cache(df_train, g1)
     static_cache2_train = build_static_cache(df_train, g2)
 
+    # ── Auto-scale λ for the NRMSE regularization term ───────────────────
+    # Loss(Θ) = NLL(Θ) + λ·NRMSE(Θ), where NLL is the joint bivariate EKF
+    # negative log-likelihood and NRMSE = RMSE_1/ȳ_1 + RMSE_2/ȳ_2 (see
+    # modules/kalman.py::joint_composite_loss). λ is fixed ONCE here, at
+    # the starting point θ0 — not re-estimated every optimizer iteration,
+    # which would make the objective a moving target the optimizer could
+    # never converge against. It's picked so the two terms contribute
+    # comparably (50/50) to the loss AT θ0: λ = |NLL(θ0)| / NRMSE(θ0).
+    p1_0 = unpack_theta(theta0_1, g1)
+    p2_0 = unpack_theta(theta0_2, g2)
+    _, nll0, nrmse0, _, _ = joint_composite_loss(
+        df_train, p1_0, g1, p2_0, g2, rho0, phi1_0, phi2_0, lambda_reg=0.0,
+        static_cache1=static_cache1_train, static_cache2=static_cache2_train)
+    lambda_reg = abs(nll0) / max(nrmse0, 1e-8)
+
     if method == "Nevergrad" and NEVERGRAD_AVAILABLE and ng_cfg:
         best_theta_joint, _ = run_nevergrad_optimizer_joint(
             df_train, g1, g2, theta0_joint, bounds_joint, n1, n2, ng_cfg,
-            static_cache1=static_cache1_train, static_cache2=static_cache2_train)
+            static_cache1=static_cache1_train, static_cache2=static_cache2_train,
+            lambda_reg=lambda_reg)
         opt_success = True; opt_nit = ng_cfg.get("budget", 500)
     else:
         # Same normalization fix as the single-dependent path above (see
@@ -611,11 +628,10 @@ def run_multi_dependent_pipeline(df_full, config, max_iter, method, ng_cfg=None)
                 phi1 = phi2 = 0.0
             p1 = unpack_theta(theta1, g1)
             p2 = unpack_theta(theta2, g2)
-            (_, _, _, _, _, _, _, _, _, loglik, _, _) = \
-                run_bivariate_kalman_filter(df_train, p1, g1, p2, g2, rho, phi1, phi2,
-                                             static_cache1=static_cache1_train,
-                                             static_cache2=static_cache2_train)
-            return -loglik
+            loss, _, _, _, _ = joint_composite_loss(
+                df_train, p1, g1, p2, g2, rho, phi1, phi2, lambda_reg,
+                static_cache1=static_cache1_train, static_cache2=static_cache2_train)
+            return loss
         opt = minimize(objective, theta0_joint_norm, method=method,
                         bounds=norm_bounds_joint,
                         options={"maxiter": max_iter, "ftol": 1e-9, "eps": 1e-6})
@@ -658,6 +674,12 @@ def run_multi_dependent_pipeline(df_full, config, max_iter, method, ng_cfg=None)
         opt_success, opt_nit, joint_loglik, n_train=n_train,
     )
 
+    # NRMSE regularization diagnostics, evaluated on the FULL dataset with
+    # the fitted params (same pattern as joint_loglik above) — lets the
+    # Results tab show what the regularizer actually saw, even though the
+    # optimizer itself only ever saw the train-window version of these.
+    full_nrmse, full_rmse1, full_rmse2 = compute_joint_nrmse(residuals_joint, df_full, g1, g2)
+
     for res in (results_1, results_2):
         res["rho_y"] = best_rho
         res["phi1"] = best_phi1  # coefficient of Intercept_Dep2,t-1 in Dep1's intercept eq
@@ -666,6 +688,10 @@ def run_multi_dependent_pipeline(df_full, config, max_iter, method, ng_cfg=None)
         res["joint_loglik"] = joint_loglik
         res["joint_fit"] = True
         res["P_smooth"] = P_smooth_joint  # joint covariance (block layout: dim1 then dim2)
+        res["lambda_reg"] = lambda_reg          # auto-scaled λ, fixed at θ0 (see above)
+        res["nrmse_reg"] = full_nrmse           # RMSE_1/ȳ_1 + RMSE_2/ȳ_2, full data
+        res["rmse_dep1"] = full_rmse1
+        res["rmse_dep2"] = full_rmse2
 
     return results_1, results_2
 

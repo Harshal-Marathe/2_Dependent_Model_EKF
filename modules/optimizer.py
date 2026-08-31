@@ -10,7 +10,10 @@ from concurrent.futures import ThreadPoolExecutor
 
 from modules.params import unpack_theta
 from modules.bounds import build_normalized_problem
-from modules.kalman import run_kalman_filter, run_bivariate_kalman_filter, build_static_cache
+from modules.kalman import (
+    run_kalman_filter, run_bivariate_kalman_filter, build_static_cache,
+    joint_composite_loss,
+)
 
 
 def _composite_loss(theta, df_train, g, static_cache=None):
@@ -122,13 +125,19 @@ def run_nevergrad_optimizer(df_train, g, theta0, bounds, ng_cfg, static_cache=No
 # ── Joint (bivariate) composite loss & optimizer ─────────────────────────────
 
 def _composite_loss_joint(theta_joint, df_train, g1, g2, n1, n2,
-                           static_cache1=None, static_cache2=None):
+                           static_cache1=None, static_cache2=None,
+                           lambda_reg=0.0):
     """
     Same composite-loss idea as `_composite_loss`, but evaluated on the
     JOINT bivariate Kalman filter so both dependent variables (the error
     correlation rho, and the cross-intercept coupling phi_1/phi_2) are
     optimised together in a single Nevergrad run, rather than as separate
     sequential optimizer calls.
+
+    `lambda_reg` weights an NRMSE regularization term added on top of the
+    EKF negative log-likelihood — see modules/kalman.py::joint_composite_loss
+    for the exact formula. Defaults to 0.0 (pure NLL, old behaviour) so
+    existing callers that don't pass it are unaffected.
 
     theta_joint = [theta_1 (len n1) | theta_2 (len n2) | rho | phi_1 | phi_2]
 
@@ -163,19 +172,20 @@ def _composite_loss_joint(theta_joint, df_train, g1, g2, n1, n2,
             phi1 = phi2 = 0.0
         p1 = unpack_theta(theta1, g1)
         p2 = unpack_theta(theta2, g2)
-        (_, _, _, _, _, _, _, _, _, loglik, _, _) = \
-            run_bivariate_kalman_filter(df_train, p1, g1, p2, g2, rho, phi1, phi2,
-                                         static_cache1=static_cache1, static_cache2=static_cache2)
-        return -loglik
+        loss, _, _, _, _ = joint_composite_loss(
+            df_train, p1, g1, p2, g2, rho, phi1, phi2, lambda_reg,
+            static_cache1=static_cache1, static_cache2=static_cache2)
+        return loss
     except Exception:
         return 1e12
 
 
 def run_nevergrad_optimizer_joint(df_train, g1, g2, theta0_joint, bounds_joint, n1, n2, ng_cfg,
-                                   static_cache1=None, static_cache2=None):
+                                   static_cache1=None, static_cache2=None, lambda_reg=0.0):
     """Joint-mode counterpart of run_nevergrad_optimizer: optimises
     theta_1, theta_2, rho, and the cross-intercept coupling phi_1/phi_2
-    together against the bivariate loglik."""
+    together against the bivariate loglik (plus the NRMSE regularization
+    term, weighted by `lambda_reg` — see joint_composite_loss)."""
     import nevergrad as ng
     strategy_name = ng_cfg.get("strategy", "NGOpt"); budget = ng_cfg.get("budget", 500)
     num_workers = max(1, int(ng_cfg.get("num_workers", 1)))
@@ -193,7 +203,8 @@ def run_nevergrad_optimizer_joint(df_train, g1, g2, theta0_joint, bounds_joint, 
     optimizer = optimizer_cls(parametrization=param, budget=budget, num_workers=num_workers)
 
     loss_fn = lambda theta_joint_norm: _composite_loss_joint(
-        unscale_joint(theta_joint_norm), df_train, g1, g2, n1, n2, static_cache1, static_cache2)
+        unscale_joint(theta_joint_norm), df_train, g1, g2, n1, n2, static_cache1, static_cache2,
+        lambda_reg=lambda_reg)
     best_theta_norm, best_loss = _ask_eval_tell_loop(
         optimizer, budget, num_workers, f"Nevergrad [{strategy_name}] (joint bivariate)", loss_fn)
     best_theta = unscale_joint(best_theta_norm) if best_theta_norm is not None else theta0_joint.copy()
