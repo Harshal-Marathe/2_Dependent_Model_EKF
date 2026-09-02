@@ -602,6 +602,15 @@ def run_multi_dependent_pipeline(df_full, config, max_iter, method, ng_cfg=None)
         static_cache1=static_cache1_train, static_cache2=static_cache2_train)
     lambda_reg = abs(nll0) / max(nrmse0, 1e-8)
 
+    # ── Loss function selection (Tab 4 · Model Configuration) ────────────
+    # "nll_nrmse" (default): Loss(Θ) = NLL(Θ) + λ·NRMSE(Θ) as auto-scaled
+    #   above. "nll_only": pure bivariate EKF negative log-likelihood,
+    #   λ forced to 0 so the NRMSE term never enters the optimizer's
+    #   objective (it's still computed/reported as a diagnostic below).
+    loss_function_mode = config.get("loss_function_mode", "nll_nrmse")
+    if loss_function_mode == "nll_only":
+        lambda_reg = 0.0
+
     if method == "Nevergrad" and NEVERGRAD_AVAILABLE and ng_cfg:
         best_theta_joint, _ = run_nevergrad_optimizer_joint(
             df_train, g1, g2, theta0_joint, bounds_joint, n1, n2, ng_cfg,
@@ -688,8 +697,9 @@ def run_multi_dependent_pipeline(df_full, config, max_iter, method, ng_cfg=None)
         res["joint_loglik"] = joint_loglik
         res["joint_fit"] = True
         res["P_smooth"] = P_smooth_joint  # joint covariance (block layout: dim1 then dim2)
-        res["lambda_reg"] = lambda_reg          # auto-scaled λ, fixed at θ0 (see above)
-        res["nrmse_reg"] = full_nrmse           # RMSE_1/ȳ_1 + RMSE_2/ȳ_2, full data
+        res["lambda_reg"] = lambda_reg          # auto-scaled λ, fixed at θ0 (see above); 0.0 if loss_function_mode == "nll_only"
+        res["loss_function_mode"] = loss_function_mode  # "nll_nrmse" | "nll_only"
+        res["nrmse_reg"] = full_nrmse           # RMSE_1/ȳ_1 + RMSE_2/ȳ_2, full data (reported even in nll_only mode)
         res["rmse_dep1"] = full_rmse1
         res["rmse_dep2"] = full_rmse2
 

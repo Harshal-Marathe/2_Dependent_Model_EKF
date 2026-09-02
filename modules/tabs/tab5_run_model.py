@@ -297,17 +297,32 @@ def render_tab5(nevergrad_available: bool):
                 # PERSISTENT block (not the transient button-press one
                 # above it) so it stays visible across reruns, same as
                 # every other metric on this page.
+                loss_mode_disp = res2.get("loss_function_mode", "nll_nrmse")
                 st.markdown("##### Joint objective being optimized")
-                st.latex(
-                    r"""
-                    \text{Loss}(\Theta) = \underbrace{\frac{1}{2}\sum_{t=1}^{T}
-                    \Big(\log|\mathbf{F}_t| + \mathbf{v}_t^{T}\mathbf{F}_t^{-1}\mathbf{v}_t\Big)}
-                    _{\text{EKF Negative Log-Likelihood (NLL)}}
-                    \;+\; \lambda\underbrace{\left(\frac{\text{RMSE}_{\text{dep1}}}{\bar y_{\text{dep1}}}
-                    + \frac{\text{RMSE}_{\text{dep2}}}{\bar y_{\text{dep2}}}\right)}
-                    _{\text{NRMSE Regularization}}
-                    """
-                )
+                if loss_mode_disp == "nll_only":
+                    st.latex(
+                        r"""
+                        \text{Loss}(\Theta) = \underbrace{\frac{1}{2}\sum_{t=1}^{T}
+                        \Big(\log|\mathbf{F}_t| + \mathbf{v}_t^{T}\mathbf{F}_t^{-1}\mathbf{v}_t\Big)}
+                        _{\text{EKF Negative Log-Likelihood (NLL)}}
+                        """
+                    )
+                    st.caption(
+                        "**EKF NLL only** was selected on Tab 4 — the NRMSE term below "
+                        "is shown as a diagnostic but was NOT part of the optimizer's "
+                        "objective (λ = 0)."
+                    )
+                else:
+                    st.latex(
+                        r"""
+                        \text{Loss}(\Theta) = \underbrace{\frac{1}{2}\sum_{t=1}^{T}
+                        \Big(\log|\mathbf{F}_t| + \mathbf{v}_t^{T}\mathbf{F}_t^{-1}\mathbf{v}_t\Big)}
+                        _{\text{EKF Negative Log-Likelihood (NLL)}}
+                        \;+\; \lambda\underbrace{\left(\frac{\text{RMSE}_{\text{dep1}}}{\bar y_{\text{dep1}}}
+                        + \frac{\text{RMSE}_{\text{dep2}}}{\bar y_{\text{dep2}}}\right)}
+                        _{\text{NRMSE Regularization}}
+                        """
+                    )
                 with st.expander("📐 Loss breakdown for this fit"):
                     lam    = res2.get("lambda_reg")
                     nrmse  = res2.get("nrmse_reg")
@@ -318,22 +333,30 @@ def render_tab5(nevergrad_available: bool):
                     if lam is not None:
                         b1, b2, b3 = st.columns(3)
                         b1.metric("NLL term", f"{nll:.2f}")
-                        b2.metric("λ (auto-scaled)", f"{lam:.4g}")
+                        b2.metric("λ (auto-scaled)" if loss_mode_disp != "nll_only" else "λ (forced)",
+                                  f"{lam:.4g}")
                         b3.metric("NRMSE term (λ·NRMSE)", f"{lam * nrmse:.2f}")
 
                         b4, b5 = st.columns(2)
                         b4.metric(f"RMSE · {config['target']}", f"{rmse_1:.4g}")
                         b5.metric(f"RMSE · {config.get('target2')}", f"{rmse_2:.4g}")
 
-                        st.caption(
-                            "λ was fixed once at θ₀ (the optimizer's starting point) so the "
-                            "NLL and NRMSE terms contribute comparably to the loss at the "
-                            "start of the search — it is NOT re-estimated every iteration. "
-                            "NLL and NRMSE above are both evaluated on the **full** dataset "
-                            "with the final fitted parameters (train+test), for diagnostics; "
-                            "the optimizer itself only ever saw the train-window version "
-                            "of this loss."
-                        )
+                        if loss_mode_disp == "nll_only":
+                            st.caption(
+                                "λ is forced to 0 — the NLL term alone drove the fit. "
+                                "NRMSE/RMSE above are evaluated on the **full** dataset "
+                                "with the final fitted parameters, purely as diagnostics."
+                            )
+                        else:
+                            st.caption(
+                                "λ was fixed once at θ₀ (the optimizer's starting point) so the "
+                                "NLL and NRMSE terms contribute comparably to the loss at the "
+                                "start of the search — it is NOT re-estimated every iteration. "
+                                "NLL and NRMSE above are both evaluated on the **full** dataset "
+                                "with the final fitted parameters (train+test), for diagnostics; "
+                                "the optimizer itself only ever saw the train-window version "
+                                "of this loss."
+                            )
                     else:
                         st.caption(
                             "Regularization diagnostics not found on this result — "

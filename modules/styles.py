@@ -70,5 +70,28 @@ def apply_styles():
         font-size:.78rem; color:#6b21a8; margin:12px 0;
     }
     .stDataFrame { border-radius:10px; overflow:hidden; }
+
+    /* ── Bigger, non-clipping multiselect ("variable selection") widgets ──
+       Default BaseWeb select caps the tag container's height and scrolls
+       once it fills up, hiding already-selected items. Let it grow and
+       wrap freely instead, so every selected variable stays visible. */
+    .stMultiSelect [data-baseweb="select"] > div {
+        max-height: none !important;
+        height: auto !important;
+        min-height: 46px;
+        overflow: visible !important;
+        flex-wrap: wrap !important;
+        align-items: flex-start !important;
+        padding-top: 4px; padding-bottom: 4px;
+    }
+    .stMultiSelect [data-baseweb="tag"] {
+        margin: 3px 4px 3px 0 !important;
+        max-width: 100% !important;
+    }
+    .stMultiSelect [data-baseweb="tag"] span[title] {
+        max-width: 220px !important;
+        overflow: visible !important;
+        white-space: normal !important;
+    }
     </style>
     """, unsafe_allow_html=True)

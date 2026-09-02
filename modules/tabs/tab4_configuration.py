@@ -662,6 +662,47 @@ def render_tab4():
             else:
                 cross_intercept_coupling_mode_str = "none"
 
+    # ── D2. Loss function (2-dependent joint fit only) ───────────────────
+    # Only meaningful for the JOINT bivariate fit — the NRMSE regularization
+    # term is defined over both dependents' residuals at once (see
+    # modules/kalman.py::joint_composite_loss), so it doesn't apply to a
+    # single-dependent fit or to the chained/mediation pipeline.
+    loss_function_mode_str = "nll_nrmse"
+    if enable_second_dependent and target2 and dependent_relationship == "joint":
+        st.markdown("#### Loss Function")
+        loss_choice = st.radio(
+            "Objective optimized during fitting",
+            [
+                "🎯 EKF NLL + λ·NRMSE Regularization (default)",
+                "📐 EKF NLL only",
+            ],
+            horizontal=False,
+            key="loss_function_mode_radio",
+            help=(
+                "Loss(Θ) = ½·Σₜ(log|Fₜ| + vₜᵀFₜ⁻¹vₜ) + λ·(RMSE_dep1/ȳ_dep1 + "
+                "RMSE_dep2/ȳ_dep2)\n\n"
+                "**EKF NLL + λ·NRMSE Regularization**: the bivariate Kalman "
+                "negative log-likelihood plus an NRMSE penalty term. λ is "
+                "auto-scaled once at the starting point so the two terms "
+                "contribute roughly 50/50 to the loss — this pulls the fit "
+                "toward lower prediction error on top of maximizing "
+                "likelihood, and is the default/original behaviour.\n\n"
+                "**EKF NLL only**: pure bivariate EKF negative "
+                "log-likelihood — λ is forced to 0, so the NRMSE term "
+                "never enters the optimizer's objective. NRMSE is still "
+                "computed and shown in Results as a diagnostic either way."
+            ),
+        )
+        loss_function_mode_str = (
+            "nll_nrmse" if loss_choice.startswith("🎯") else "nll_only"
+        )
+        st.caption(
+            "**Active objective:** "
+            + ("Loss(Θ) = NLL(Θ) + λ·NRMSE(Θ), λ auto-scaled at θ₀"
+               if loss_function_mode_str == "nll_nrmse"
+               else "Loss(Θ) = NLL(Θ)  *(λ forced to 0 — NRMSE not optimized)*")
+        )
+
     # Summary box showing the active state equation. Adstock is now chosen
     # PER CHANNEL (adstock_map above) — the transform (Hill/Power) is still
     # one global choice for all media betas, so the equation shown here is
@@ -945,6 +986,7 @@ def render_tab4():
                 "intercept_transform_type": intercept_transform_type_str,
                 "intercept_dynamics_type": intercept_dynamics_type_str,
                 "cross_intercept_coupling_mode": cross_intercept_coupling_mode_str,
+                "loss_function_mode": loss_function_mode_str,
                 "adstock_n_lags": int(n_lags),
                 "use_organic": use_organic,
                 "use_price": use_price,
@@ -1005,6 +1047,12 @@ def render_tab4():
                         f"➕ Second dependent variable enabled: **{target2}** — will be "
                         f"fitted **jointly** with **{target}** in Tab 6 using a bivariate "
                         f"Kalman filter (shared predictors x_t, correlated errors)."
+                    )
+                    st.caption(
+                        "**Loss function:** "
+                        + ("EKF NLL + λ·NRMSE Regularization"
+                           if loss_function_mode_str == "nll_nrmse"
+                           else "EKF NLL only")
                     )
                 if different_predictors_2:
                     st.info(
