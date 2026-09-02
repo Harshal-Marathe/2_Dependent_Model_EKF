@@ -498,7 +498,13 @@ def run_multi_dependent_pipeline(df_full, config, max_iter, method, ng_cfg=None)
     # dimensions). Falls back to sharing config["dummy_cols"] only for
     # older saved configs that predate "dummy_cols_2" entirely.
     config_2["dummy_cols"] = config.get("dummy_cols_2", config.get("dummy_cols", []))
-    # Re-derive Dep 2's own initial-beta defaults against ITS OWN (possibly
+    # Dependent 2 also gets its OWN intercept dynamics choice (Tab 4 ·
+    # "Intercept Dynamics") — carryover AR(1) baseline vs. a simple/constant
+    # regression baseline — independent of Dependent 1's. Falls back to
+    # Dependent 1's value for older saved configs that predate the
+    # per-dependent split.
+    config_2["intercept_dynamics_type"] = config.get(
+        "intercept_dynamics_type_2", config.get("intercept_dynamics_type", "carryover"))
     # different) channel lists rather than reusing Dep 1's, which may not
     # even contain the same columns.
     config_2["initial_media_betas"]         = {c: 0.0     for c in config_2["media"]}
@@ -532,9 +538,10 @@ def run_multi_dependent_pipeline(df_full, config, max_iter, method, ng_cfg=None)
     #   Intercept_2,t = G0_2·Intercept_2,t-1 + phi_2·Intercept_1,t-1 + effectors_2,t
     # phi is itself a carryover mechanism (it references the OTHER
     # equation's PREVIOUS intercept), so it only makes sense — and only
-    # gets a theta slot — when both equations are on "carryover" intercept
-    # dynamics. Both g1/g2 share the one "intercept_dynamics_type" config
-    # value (no per-dependent override), so checking g1 is sufficient.
+    # gets a theta slot — when BOTH equations are on "carryover" intercept
+    # dynamics. g1/g2 now each carry their OWN "intercept_dynamics_type"
+    # (Tab 4 lets Dependent 1 and Dependent 2 pick independently), so both
+    # must be checked — either one being "simple" disables coupling.
     # In "simple" mode the theta_joint layout is simply [theta_1|theta_2|rho]
     # (one fewer block than the carryover-mode layout below) — every
     # downstream reader (optimizer.py, and the extraction code further
@@ -542,7 +549,7 @@ def run_multi_dependent_pipeline(df_full, config, max_iter, method, ng_cfg=None)
     # rather than assuming a fixed width, so nothing else needs to branch
     # on this flag.
     #
-    # On top of that carryover gate, CROSS_INTERCEPT_COUPLING_MODE (also
+    # On top of that carryover gate, CROSS_INTERCEPT_COUPLING_MODE (still
     # shared across g1/g2 — checking g1 is sufficient) picks which
     # direction(s) of coupling are actually estimated:
     #   "both"         -> phi_1 and phi_2 both free
@@ -555,6 +562,7 @@ def run_multi_dependent_pipeline(df_full, config, max_iter, method, ng_cfg=None)
     coupling_mode = g1.get("CROSS_INTERCEPT_COUPLING_MODE", "both")
     use_cross_intercept_coupling = (
         g1.get("INTERCEPT_DYNAMICS_TYPE", "carryover") != "simple"
+        and g2.get("INTERCEPT_DYNAMICS_TYPE", "carryover") != "simple"
         and coupling_mode != "none"
     )
     # allow_phi1/allow_phi2 also gate the objective function and the
@@ -772,6 +780,10 @@ def run_chained_dependent_pipeline(df_full, config, max_iter, method, ng_cfg=Non
     # See the identical note in run_multi_dependent_pipeline above — Dep 2
     # gets its own spike/outlier dummies by default, not Dep 1's.
     config_2["dummy_cols"] = config.get("dummy_cols_2", config.get("dummy_cols", []))
+    # Dependent 2 also gets its OWN intercept dynamics choice — see the
+    # identical note in run_multi_dependent_pipeline above.
+    config_2["intercept_dynamics_type"] = config.get(
+        "intercept_dynamics_type_2", config.get("intercept_dynamics_type", "carryover"))
     config_2["initial_media_betas"]         = {c: 0.0     for c in config_2["media"]}
     config_2["initial_comp_betas"]          = {c: -0.0001 for c in config_2["comp_media"]}
     config_2["initial_own_nonmedia_betas"]  = {c: 0.0     for c in config_2["non_media"]}
