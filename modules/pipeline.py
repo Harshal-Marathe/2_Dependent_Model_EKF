@@ -141,12 +141,30 @@ def _postprocess_equation(df_full, g, params, x_smooth, adstocked_media,
 
     contrib_df = df_full[[TARGET_COL]].copy()
 
+    INTERCEPT_DYNAMICS_TYPE = g.get("INTERCEPT_DYNAMICS_TYPE", "carryover")
     G0 = float(params["G0"])
     I0 = float(params.get("I0", 0.0))
     prev_intercept = np.empty(len(df_full))
     prev_intercept[1:] = x_smooth[:-1, 0]
     prev_intercept[0]  = x_smooth[0, 0]
-    intercept_carryover = G0 * prev_intercept
+    if INTERCEPT_DYNAMICS_TYPE == "weibull":
+        # Weibull multi-lag carryover: recompute the same Σ_l w_l·I_(t-l)
+        # sum directly on the SMOOTHED intercept series (x_smooth[:,0]) —
+        # reusing the identical weighted-lag-sum function used for media
+        # adstock, since post-smoothing this is just a known series, no
+        # need to reference the internal shadow-lag states. Scaled by G0
+        # (the overall persistence, same role/bound as AR(1)'s G0) to
+        # match the actual state equation — see modules/kalman.py.
+        from modules.transforms import adstock_weibull_lagged
+        n_lags_i = int(g.get("INTERCEPT_WEIBULL_N_LAGS", 4))
+        intercept_carryover = G0 * adstock_weibull_lagged(
+            pd.Series(x_smooth[:, 0]),
+            float(params.get("intercept_weibull_shape", 1.5)),
+            float(params.get("intercept_weibull_scale", 1.0)),
+            n_lags_i,
+        )
+    else:
+        intercept_carryover = G0 * prev_intercept
 
     # Short-term view: the intercept as it actually enters the observation
     # equation, Y_t = intercept_t + Σ beta_i,t * media_i,t + ...  (i.e. the
@@ -158,13 +176,14 @@ def _postprocess_equation(df_full, g, params, x_smooth, adstocked_media,
     # boost piece. Named "Intercept Carryover" (not "Intercept") so it
     # doesn't collide with the short-term "Intercept" row when Short-Term +
     # Long-Term are combined.
-    #   Carryover dynamics: I_t = G0 * I_(t-1) + Σ_k gamma_k * f(media_k,t)
-    #   Simple dynamics:    I_t = I0           + Σ_k gamma_k * f(media_k,t)
+    #   Carryover dynamics: I_t = G0 * I_(t-1)          + Σ_k gamma_k * f(media_k,t)
+    #   Simple dynamics:    I_t = I0                    + Σ_k gamma_k * f(media_k,t)
+    #   Weibull dynamics:   I_t = Σ_l w_l * I_(t-l)      + Σ_k gamma_k * f(media_k,t)
     # In "simple" mode G0 is 0 so intercept_carryover is already all-zero;
     # the constant I0 baseline is broken out into its own column instead so
     # the long-term pieces still sum to the full intercept level.
     contrib_df["LongTerm_Intercept Carryover"] = intercept_carryover
-    if g.get("INTERCEPT_DYNAMICS_TYPE", "carryover") == "simple":
+    if INTERCEPT_DYNAMICS_TYPE == "simple":
         contrib_df["LongTerm_Intercept Baseline (I0)"] = np.full(len(df_full), I0)
 
     for i, col in enumerate(MEDIA_COLS):
@@ -341,8 +360,14 @@ def _postprocess_equation(df_full, g, params, x_smooth, adstocked_media,
             {"Category":"Synergy","Variable":pair_label,"Parameter":"Cross Hill n","Value":params["cross_n"][k]},
             {"Category":"Synergy","Variable":pair_label,"Parameter":"Cross Hill S","Value":params["cross_S"][k]},
         ]
-    if g.get("INTERCEPT_DYNAMICS_TYPE", "carryover") == "simple":
+    _idt = g.get("INTERCEPT_DYNAMICS_TYPE", "carryover")
+    if _idt == "simple":
         param_rows.append({"Category":"Global","Variable":"Intercept","Parameter":"I0",     "Value":params.get("I0", 0.0)})
+    elif _idt == "weibull":
+        param_rows.append({"Category":"Global","Variable":"Intercept","Parameter":"G0 (overall persistence)","Value":params["G0"]})
+        param_rows.append({"Category":"Global","Variable":"Intercept","Parameter":"Intercept Weibull shape k","Value":params.get("intercept_weibull_shape", 1.5)})
+        param_rows.append({"Category":"Global","Variable":"Intercept","Parameter":"Intercept Weibull scale λ","Value":params.get("intercept_weibull_scale", 1.0)})
+        param_rows.append({"Category":"Global","Variable":"Intercept","Parameter":"Intercept Weibull n_lags","Value":g.get("INTERCEPT_WEIBULL_N_LAGS", 4)})
     else:
         param_rows.append({"Category":"Global","Variable":"Intercept","Parameter":"G0",     "Value":params["G0"]})
     param_rows.append({"Category":"Global","Variable":"Noise",    "Parameter":"sigma_y","Value":params["sigma_y"]})
@@ -505,6 +530,8 @@ def run_multi_dependent_pipeline(df_full, config, max_iter, method, ng_cfg=None)
     # per-dependent split.
     config_2["intercept_dynamics_type"] = config.get(
         "intercept_dynamics_type_2", config.get("intercept_dynamics_type", "carryover"))
+    config_2["intercept_weibull_n_lags"] = config.get(
+        "intercept_weibull_n_lags_2", config.get("intercept_weibull_n_lags", 4))
     # different) channel lists rather than reusing Dep 1's, which may not
     # even contain the same columns.
     config_2["initial_media_betas"]         = {c: 0.0     for c in config_2["media"]}
@@ -784,6 +811,8 @@ def run_chained_dependent_pipeline(df_full, config, max_iter, method, ng_cfg=Non
     # identical note in run_multi_dependent_pipeline above.
     config_2["intercept_dynamics_type"] = config.get(
         "intercept_dynamics_type_2", config.get("intercept_dynamics_type", "carryover"))
+    config_2["intercept_weibull_n_lags"] = config.get(
+        "intercept_weibull_n_lags_2", config.get("intercept_weibull_n_lags", 4))
     config_2["initial_media_betas"]         = {c: 0.0     for c in config_2["media"]}
     config_2["initial_comp_betas"]          = {c: -0.0001 for c in config_2["comp_media"]}
     config_2["initial_own_nonmedia_betas"]  = {c: 0.0     for c in config_2["non_media"]}
