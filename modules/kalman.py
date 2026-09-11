@@ -60,20 +60,13 @@ for whether the intercept persists period-to-period at all:
   Weibull (multi-lag Weibull-adstocked carryover — a distributed-lag,
   potentially delayed/S-shaped persistence, reaching back L =
   INTERCEPT_WEIBULL_N_LAGS periods, in place of AR(1)'s single-lag G0):
-    I_t = G0 · Σ_{l=1}^{L} w_l · I_{t-l}  +  Σ_k γ_k · f(media_k,t)
-   HEAD
+    I_t = Σ_{l=1}^{L} w_l · I_{t-l}  +  Σ_k γ_k · f(media_k,t)
     (w_1..w_L are normalised Weibull CDF-interval-mass weights summing to
     1 — same weibull_lag_weights() function used for per-channel media
-    adstock, fitted shape k / scale λ. G0 here plays the SAME overall-persistence
-
-    (w_1..w_L are normalised Weibull PDF weights summing to 1 — same
-    weibull_lag_weights() function used for per-channel media adstock,
-    fitted shape k / scale λ. G0 here plays the SAME overall-persistence
- b955e2f2c0dbdc27cce7337feb6255f8811e94ad
-    role/bound as AR(1)'s G0 — spread across L lags via the Weibull shape
-    instead of concentrated at lag 1 — and keeps the AR(L) feedback
-    stationary/mean-reverting rather than a unit root, since the Weibull
-    weights alone always sum to exactly 1.)
+    adstock, fitted shape k / scale λ. No G0 scalar here — unlike
+    "carryover" mode, the normalised weights are used directly as the
+    persistence sum, so this is a unit-root AR(L) feedback rather than a
+    G0 < 1 stationary/mean-reverting one.)
 
   Implemented via L-1 extra "shadow lag" states appended to the END of the
   state vector (after every other block — media/comp/non-media/price/
@@ -301,14 +294,13 @@ def _build_transition_matrix(g, params):
         w = weibull_lag_weights(params["intercept_weibull_shape"],
                                  params["intercept_weibull_scale"], n_lags)
         # w sums to exactly 1 by construction (weibull_lag_weights
-        # normalises it) — multiplying by G0 (bounded < 1, see
-        # modules/bounds.py) keeps the AR(L) companion matrix's
-        # coefficients summing to G0 < 1, i.e. stationary/mean-reverting,
-        # instead of a unit root.
-        G0 = params["G0"]
-        Tmat[0, 0] = G0 * w[0]
+        # normalises it). No G0 scalar in front of it — unlike
+        # "carryover" mode, the normalised weights are used directly as
+        # the AR(L) companion matrix's coefficients (unit-root feedback,
+        # not G0 < 1 stationary/mean-reverting).
+        Tmat[0, 0] = w[0]
         for j in range(extra_lags):
-            Tmat[0, base_dim + j] = G0 * w[j + 1]
+            Tmat[0, base_dim + j] = w[j + 1]
         if extra_lags >= 1:
             # Clear the shadow-lag block's identity diagonal first — np.eye
             # left a 1.0 there, which (left in place alongside the shift

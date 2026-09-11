@@ -183,7 +183,6 @@ def _block_slices(g: dict):
     if INTERCEPT_DYNAMICS_TYPE == "simple":
         add("I0", 1, scalar=True)
     elif INTERCEPT_DYNAMICS_TYPE == "weibull":
-        add("G0", 1, scalar=True)
         add("intercept_weibull_shape", 1, scalar=True)
         add("intercept_weibull_scale", 1, scalar=True)
     else:

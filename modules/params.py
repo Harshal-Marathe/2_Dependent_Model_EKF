@@ -84,10 +84,12 @@ def _make_globals(cfg: dict):
     #     (w_1..w_L are normalised Weibull CDF-interval-mass weights over L = 
     #     INTERCEPT_WEIBULL_N_LAGS past periods, from the SAME
     #     weibull_lag_weights() used by the per-channel media adstock —
-    #     see modules/transforms.py. Fitted shape k / scale λ.)
+    #     see modules/transforms.py. Fitted shape k / scale λ. No G0 term:
+    #     the normalised weights are used directly as the persistence sum.)
     # In "simple" mode G0 is fixed at 0 (no theta slot) and a fitted constant
-    # I0 takes its place. In "weibull" mode G0 and I0 are both fixed at 0 and
-    # two theta slots (shape, scale) take their place instead. For the
+    # I0 takes its place. In "weibull" mode G0 is fixed at 1.0 (unused, no
+    # theta slot) and I0 is fixed at 0; two theta slots (shape, scale) take
+    # G0's place instead. For the
     # 2-dependent joint model, "simple" also switches off the cross-intercept
     # coupling (phi_1/phi_2) — see modules/pipeline.py::run_multi_dependent_pipeline.
     g["INTERCEPT_DYNAMICS_TYPE"] = cfg.get("intercept_dynamics_type", "carryover")  # "carryover" | "simple" | "weibull"
@@ -206,14 +208,10 @@ def unpack_theta(theta, g: dict):
         intercept_weibull_shape = 1.5
         intercept_weibull_scale = 1.0
     elif INTERCEPT_DYNAMICS_TYPE == "weibull":
-        G0 = theta[idx];                   idx += 1  # overall persistence — same
-                                                       # role/bound as AR(1)'s G0,
-                                                       # just spread across L lags
-                                                       # via the Weibull shape below
-                                                       # instead of concentrated at
-                                                       # lag 1 (keeps it < 1, i.e.
-                                                       # stationary/mean-reverting,
-                                                       # instead of a unit-root sum).
+        G0 = 1.0  # no overall-persistence scalar in weibull mode — the
+                   # Weibull-weighted lag sum (w_1..w_L, summing to 1) is
+                   # used directly as I_t's persistence term, so G0 gets
+                   # no theta slot here at all (unlike "carryover" mode).
         I0 = 0.0
         intercept_weibull_shape = theta[idx]; idx += 1
         intercept_weibull_scale = theta[idx]; idx += 1

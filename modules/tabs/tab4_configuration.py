@@ -599,16 +599,15 @@ def render_tab4():
                 "**With carryover — AR(1)** (default): I_t = G0 · I_{t-1} + "
                 "Σ_k γ_k · f(media_k,t). The baseline has its own AR(1) "
                 "memory (persistence G0), on top of the effector boost.\n\n"
-                "**With carryover — Weibull adstock**: I_t = G0 · Σ_l w_l · "
+                "**With carryover — Weibull adstock**: I_t = Σ_l w_l · "
                 "I_{t-l} + Σ_k γ_k · f(media_k,t). The baseline's memory "
                 "reaches back over several past periods (window set below) "
                 "with Weibull-shaped weights — a delayed/S-curve decay "
-                "instead of AR(1)'s single-lag exponential decay. G0 here "
-                "plays the same overall-persistence role as AR(1)'s G0 "
-                "(fitted, same bounded range), just spread across the "
-                "window via the Weibull shape (also fitted: shape k / "
-                "scale λ, same mechanism as the per-channel Weibull media "
-                "adstock) instead of concentrated at lag 1.\n\n"
+                "instead of AR(1)'s single-lag exponential decay. No G0 "
+                "scalar here — the normalised Weibull weights (shape k / "
+                "scale λ, both fitted, same mechanism as the per-channel "
+                "Weibull media adstock) are used directly as the "
+                "persistence term.\n\n"
                 "**Without carryover**: I_t = I0 + Σ_k γ_k · f(media_k,t). "
                 "A plain regression on the current period's effectors "
                 "around a fitted constant I0 — no dependence on the "
@@ -817,7 +816,7 @@ def render_tab4():
 
     _intercept_lead = (
         "I0" if use_simple_intercept
-        else f"G0 · Σ_l w_l · I_{{t-l}}  (L={intercept_weibull_n_lags})" if use_weibull_intercept
+        else f"Σ_l w_l · I_{{t-l}}  (L={intercept_weibull_n_lags})" if use_weibull_intercept
         else "G₀ · I_{t-1}"
     )
     if use_hill_intercept:

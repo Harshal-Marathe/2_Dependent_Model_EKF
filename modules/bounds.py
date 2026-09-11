@@ -60,17 +60,17 @@ def _build_theta0_and_bounds(df, g):
         intercept_dyn_init   = [I0_init]
         intercept_dyn_bounds = [I0_bound]
     elif INTERCEPT_DYNAMICS_TYPE == "weibull":
-        # G0 here plays the SAME overall-persistence role/bound as AR(1)'s
-        # G0 — see modules/params.py::unpack_theta — it just gets spread
-        # across L lags via the Weibull-shaped weights (shape/scale)
-        # instead of being concentrated entirely at lag 1. Keeping it
-        # bounded < 1 (same (0.6, 0.99) range) guarantees the intercept's
-        # own AR(L) feedback stays stationary/mean-reverting, since the
-        # Weibull weights themselves always normalise to sum exactly 1
-        # (a unit root on their own, fine for a one-off lag-weighted sum
-        # of exogenous media spend, but not for recursive state feedback).
-        intercept_dyn_init   = [G0_init, IW_shape_init, IW_scale_init]
-        intercept_dyn_bounds = [G0_bound, IW_shape_bound, IW_scale_bound]
+        # No G0 here — unlike "carryover" (AR(1)), the Weibull multi-lag
+        # sum Σ_l w_l·I_(t-l) is used directly as the intercept's
+        # persistence term, with no extra overall-persistence scalar in
+        # front of it. The Weibull weights themselves always normalise to
+        # sum exactly 1 (see modules/transforms.py::weibull_lag_weights),
+        # so the intercept's own AR(L) feedback is a genuine unit-root
+        # distributed lag — stationarity here comes entirely from the
+        # media-effector boost and the process/observation noise, not
+        # from a G0 < 1 damping factor.
+        intercept_dyn_init   = [IW_shape_init, IW_scale_init]
+        intercept_dyn_bounds = [IW_shape_bound, IW_scale_bound]
     else:
         intercept_dyn_init   = [G0_init]
         intercept_dyn_bounds = [G0_bound]

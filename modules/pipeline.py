@@ -152,12 +152,12 @@ def _postprocess_equation(df_full, g, params, x_smooth, adstocked_media,
         # sum directly on the SMOOTHED intercept series (x_smooth[:,0]) —
         # reusing the identical weighted-lag-sum function used for media
         # adstock, since post-smoothing this is just a known series, no
-        # need to reference the internal shadow-lag states. Scaled by G0
-        # (the overall persistence, same role/bound as AR(1)'s G0) to
-        # match the actual state equation — see modules/kalman.py.
+        # need to reference the internal shadow-lag states. No G0 scalar
+        # here — the normalised weights are used directly, matching the
+        # actual state equation — see modules/kalman.py.
         from modules.transforms import adstock_weibull_lagged
         n_lags_i = int(g.get("INTERCEPT_WEIBULL_N_LAGS", 4))
-        intercept_carryover = G0 * adstock_weibull_lagged(
+        intercept_carryover = adstock_weibull_lagged(
             pd.Series(x_smooth[:, 0]),
             float(params.get("intercept_weibull_shape", 1.5)),
             float(params.get("intercept_weibull_scale", 1.0)),
@@ -364,7 +364,6 @@ def _postprocess_equation(df_full, g, params, x_smooth, adstocked_media,
     if _idt == "simple":
         param_rows.append({"Category":"Global","Variable":"Intercept","Parameter":"I0",     "Value":params.get("I0", 0.0)})
     elif _idt == "weibull":
-        param_rows.append({"Category":"Global","Variable":"Intercept","Parameter":"G0 (overall persistence)","Value":params["G0"]})
         param_rows.append({"Category":"Global","Variable":"Intercept","Parameter":"Intercept Weibull shape k","Value":params.get("intercept_weibull_shape", 1.5)})
         param_rows.append({"Category":"Global","Variable":"Intercept","Parameter":"Intercept Weibull scale λ","Value":params.get("intercept_weibull_scale", 1.0)})
         param_rows.append({"Category":"Global","Variable":"Intercept","Parameter":"Intercept Weibull n_lags","Value":g.get("INTERCEPT_WEIBULL_N_LAGS", 4)})

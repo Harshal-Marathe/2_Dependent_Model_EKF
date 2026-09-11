@@ -188,11 +188,13 @@ def render_tab7():
                 help="Recommended — residual variance usually shifts slightly "
                      "once a new variable explains part of it.")
             refit_G0 = st.checkbox(
-                "Also re-optimize global intercept persistence/baseline (G0 or I0)",
+                "Also re-optimize global intercept persistence/baseline "
+                "(G0, I0, or Weibull shape/scale)",
                 value=False, key="refit_G0",
-                help="Covers whichever of the two applies to this model's "
-                     "Intercept Dynamics setting — G0 (Carryover mode) or "
-                     "I0 (Simple/no-carryover mode).")
+                help="Covers whichever applies to this model's Intercept "
+                     "Dynamics setting — G0 (Carryover/AR(1) mode), I0 "
+                     "(Simple/no-carryover mode), or the Weibull shape/"
+                     "scale (Weibull carryover mode; that mode has no G0).")
         freeze_existing = st.checkbox(
             "🔒 Freeze all previously-fitted parameters (recommended)", value=True,
             key="refit_freeze",
