@@ -50,13 +50,21 @@ def adstock_nerlove_arrow(x: pd.Series, lam: float) -> np.ndarray:
 
 def weibull_lag_weights(shape_k: float, scale_lam: float, n_lags: int) -> np.ndarray:
     """
-    Compute normalised Weibull PDF weights w_1, w_2, …, w_j for j = n_lags
+    Compute normalised Weibull weights w_1, w_2, …, w_j for j = n_lags
     past periods (t-1, t-2, …, t-j). The current period (t) is NOT included.
 
-    Formula, for lag index l = 1, 2, …, j:
-        w_l = (k / λ) · (l / λ)^(k−1) · exp( −(l / λ)^k )
+    Each weight is the actual Weibull CDF probability MASS falling in the
+    unit interval [l, l+1) for lag l = 1, 2, …, j — i.e. F(l+1) − F(l) —
+    NOT a point-sample of the PDF at l. This integrates the true area
+    under the curve over each period rather than approximating it with a
+    single point value, which matters most for short/coarse windows.
 
-    Weights are normalised so they sum to exactly 1:
+    Using the survival function S(x) = 1 − F(x) = exp( −(x/λ)^k ):
+        w_l = F(l+1) − F(l) = S(l) − S(l+1)          (mass in [l, l+1))
+
+    Weights are then renormalised so they sum to exactly 1 over the
+    truncated window (the raw masses sum to S(1) − S(j+1) < 1, since
+    there's left-over probability mass below lag 1 and beyond lag j):
         w_1 + w_2 + … + w_j = 1
 
     n_lags = j returns exactly j weights. n_lags = 0 returns an empty array
@@ -65,9 +73,9 @@ def weibull_lag_weights(shape_k: float, scale_lam: float, n_lags: int) -> np.nda
     j = int(n_lags)
     if j <= 0:
         return np.zeros(0)
-    lags = np.arange(1, j + 1, dtype=float)            # l = 1, 2, …, j
-    ratio = lags / scale_lam
-    w = (shape_k / scale_lam) * (ratio ** (shape_k - 1)) * np.exp(-(ratio ** shape_k))
+    lags = np.arange(1, j + 2, dtype=float)             # l = 1, 2, …, j+1
+    S = np.exp(-(lags / scale_lam) ** shape_k)          # survival at each l
+    w = S[:-1] - S[1:]                                  # mass in [l, l+1) for l=1..j
     w = np.maximum(w, 0.0)
     total = w.sum()
     if total < 1e-12:

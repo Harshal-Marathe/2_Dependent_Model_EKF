@@ -47,6 +47,34 @@ def _build_theta0_and_bounds(df, g):
     I0_bound = (0.0, None)
     I0_init  = float(df[g["TARGET_COL"]].mean()) * 0.5 if len(df) else 0.0
 
+    # Intercept Weibull shape/scale bounds (weibull multi-lag carryover
+    # mode) — same range as the per-channel media Weibull adstock bounds
+    # below, since it's the exact same weight-generating function
+    # (weibull_lag_weights) just applied to the intercept's own history.
+    IW_shape_bound = (0.1, 5.0)
+    IW_scale_bound = (0.1, 5.0)
+    IW_shape_init  = 1.5
+    IW_scale_init  = 1.0
+
+    if INTERCEPT_DYNAMICS_TYPE == "simple":
+        intercept_dyn_init   = [I0_init]
+        intercept_dyn_bounds = [I0_bound]
+    elif INTERCEPT_DYNAMICS_TYPE == "weibull":
+        # G0 here plays the SAME overall-persistence role/bound as AR(1)'s
+        # G0 — see modules/params.py::unpack_theta — it just gets spread
+        # across L lags via the Weibull-shaped weights (shape/scale)
+        # instead of being concentrated entirely at lag 1. Keeping it
+        # bounded < 1 (same (0.6, 0.99) range) guarantees the intercept's
+        # own AR(L) feedback stays stationary/mean-reverting, since the
+        # Weibull weights themselves always normalise to sum exactly 1
+        # (a unit root on their own, fine for a one-off lag-weighted sum
+        # of exogenous media spend, but not for recursive state feedback).
+        intercept_dyn_init   = [G0_init, IW_shape_init, IW_scale_init]
+        intercept_dyn_bounds = [G0_bound, IW_shape_bound, IW_scale_bound]
+    else:
+        intercept_dyn_init   = [G0_init]
+        intercept_dyn_bounds = [G0_bound]
+
     # delta bounds: positive or negative constraint per media col
     def _delta_bound(col):
         if col in POSITIVE_BETA_COLS: return (0.0, None)
@@ -147,7 +175,7 @@ def _build_theta0_and_bounds(df, g):
     # ── theta0 assembly ───────────────────────────────────────────────
     theta0 = np.concatenate([
         ls_init,
-        [G0_init] if INTERCEPT_DYNAMICS_TYPE != "simple" else [I0_init],
+        intercept_dyn_init,
         delta_init,
         gamma_init,
         n_init,
@@ -174,7 +202,7 @@ def _build_theta0_and_bounds(df, g):
 
     bounds = (
         ls_bounds +
-        ([G0_bound] if INTERCEPT_DYNAMICS_TYPE != "simple" else [I0_bound]) +
+        intercept_dyn_bounds +
         delta_bounds +
         gamma_bounds +
         n_bounds +

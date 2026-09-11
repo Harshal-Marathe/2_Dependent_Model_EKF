@@ -57,6 +57,33 @@ for whether the intercept persists period-to-period at all:
               media_k,t^{n_k_intercept} /
               ( media_k,t^{n_k_intercept} + S_k_intercept^{n_k_intercept} )
 
+  Weibull (multi-lag Weibull-adstocked carryover — a distributed-lag,
+  potentially delayed/S-shaped persistence, reaching back L =
+  INTERCEPT_WEIBULL_N_LAGS periods, in place of AR(1)'s single-lag G0):
+    I_t = G0 · Σ_{l=1}^{L} w_l · I_{t-l}  +  Σ_k γ_k · f(media_k,t)
+    (w_1..w_L are normalised Weibull CDF-interval-mass weights summing to
+    1 — same weibull_lag_weights() function used for per-channel media
+    adstock, fitted shape k / scale λ. G0 here plays the SAME overall-persistence
+    role/bound as AR(1)'s G0 — spread across L lags via the Weibull shape
+    instead of concentrated at lag 1 — and keeps the AR(L) feedback
+    stationary/mean-reverting rather than a unit root, since the Weibull
+    weights alone always sum to exactly 1.)
+
+  Implemented via L-1 extra "shadow lag" states appended to the END of the
+  state vector (after every other block — media/comp/non-media/price/
+  dummies/seasonal), holding I_{t-1}..I_{t-L+1} — the intercept's own
+  index-0 slot still holds I_t as always. The transition matrix Tmat
+  encodes this as an AR(L) companion form: row 0 gets the Weibull weights
+  w_1 (on Tmat[0,0], i.e. its own previous value) and w_2..w_L (on the
+  shadow-lag columns); each shadow-lag row is a pure 1.0 shift-copy of the
+  slot "in front of" it. This keeps every other state's index unchanged
+  (media betas etc. are indexed identically to non-weibull-intercept
+  models) and lets the existing `Tmat @ x_prev` matrix multiply in
+  _predict_step do the entire AR(L) propagation — including the lag
+  shifting — with zero changes to _predict_step itself. See
+  modules/kalman.py::_intercept_extra_lags / _build_transition_matrix /
+  _build_observation_matrix / _initial_state.
+
   Every intercept-effector column — whether or not it is also a media
   channel with its own beta — is transformed the same way, with its own
   independently-fitted n_k_intercept (and S_k_intercept, Hill only).
@@ -154,6 +181,28 @@ from modules.transforms import (
 )
 
 
+# ── Intercept Weibull carryover: state-dimension helpers ─────────────────────
+
+def _intercept_extra_lags(g):
+    """Number of extra 'shadow lag' states appended to the END of the state
+    vector for the intercept's own multi-lag Weibull carryover (0 unless
+    INTERCEPT_DYNAMICS_TYPE == 'weibull'). L = INTERCEPT_WEIBULL_N_LAGS
+    total lags needs L-1 extra states — I_t itself still lives at index 0,
+    exactly as in "carryover"/"simple" mode."""
+    if g.get("INTERCEPT_DYNAMICS_TYPE", "carryover") == "weibull":
+        return max(int(g.get("INTERCEPT_WEIBULL_N_LAGS", 4)) - 1, 0)
+    return 0
+
+
+def _base_state_dim(g):
+    """State dimension WITHOUT the intercept's extra Weibull shadow-lag
+    states — i.e. the original single-intercept-slot dim formula, used as
+    both dependencies' components. This is where the shadow-lag block
+    (if any) starts."""
+    return (1 + g["N_MEDIA"] + g["N_COMP"] + g["N_OWN_NONMEDIA"] +
+            g["N_COMP_NONMEDIA"] + g["N_PRICE"] + g["N_DUMMIES"] + g["SEASONAL_DIM"])
+
+
 # ── Adstock pre-computation ──────────────────────────────────────────────────
 
 def _precompute_adstocked(df, g, params):
@@ -215,6 +264,12 @@ def _build_observation_matrix(df, g, adstocked_media):
     for c in g["COMP_NONMEDIA_COLS"]: cols.append(df[c].values.astype(float))
     for c in g["PRICE_COLS"]:         cols.append(df[c].values.astype(float))
     for c in g["DUMMY_COLS"]:         cols.append(df[c].values.astype(float))
+    # Intercept Weibull shadow-lag states (if any) carry I_{t-1}..I_{t-L+1}
+    # for the state transition's own use only — they don't separately enter
+    # the observation equation (I_t at index 0 already does, via the
+    # leading all-ones column above), so they load as zero columns here.
+    for _ in range(_intercept_extra_lags(g)):
+        cols.append(np.zeros(T))
     return np.column_stack(cols)
 
 
@@ -224,9 +279,42 @@ def _build_transition_matrix(g, params):
     N_MEDIA = g["N_MEDIA"]; N_COMP = g["N_COMP"]
     N_OWN_NONMEDIA = g["N_OWN_NONMEDIA"]; N_COMP_NONMEDIA = g["N_COMP_NONMEDIA"]
     N_PRICE = g["N_PRICE"]; N_DUMMIES = g["N_DUMMIES"]; SEASONAL_DIM = g["SEASONAL_DIM"]
-    dim = 1 + N_MEDIA + N_COMP + N_OWN_NONMEDIA + N_COMP_NONMEDIA + N_PRICE + N_DUMMIES + SEASONAL_DIM
+    base_dim = _base_state_dim(g)
+    extra_lags = _intercept_extra_lags(g)
+    dim = base_dim + extra_lags
     Tmat = np.eye(dim)
-    Tmat[0, 0] = params["G0"]
+    if g.get("INTERCEPT_DYNAMICS_TYPE", "carryover") == "weibull" and extra_lags >= 0:
+        # AR(L) companion form: row 0 (I_t) picks up the Weibull-weighted
+        # sum of I_{t-1} (its own previous value, Tmat[0,0]) and
+        # I_{t-2}..I_{t-L} (the shadow-lag states, Tmat[0, base_dim+j]).
+        # Each shadow-lag row is a pure shift-copy of the slot in front of
+        # it (weight 1.0) — together these fully implement
+        # I_t = Σ_l w_l·I_{t-l} AND the lag-history shift, so the plain
+        # `Tmat @ x_prev` multiply in _predict_step needs no other change.
+        n_lags = extra_lags + 1
+        w = weibull_lag_weights(params["intercept_weibull_shape"],
+                                 params["intercept_weibull_scale"], n_lags)
+        # w sums to exactly 1 by construction (weibull_lag_weights
+        # normalises it) — multiplying by G0 (bounded < 1, see
+        # modules/bounds.py) keeps the AR(L) companion matrix's
+        # coefficients summing to G0 < 1, i.e. stationary/mean-reverting,
+        # instead of a unit root.
+        G0 = params["G0"]
+        Tmat[0, 0] = G0 * w[0]
+        for j in range(extra_lags):
+            Tmat[0, base_dim + j] = G0 * w[j + 1]
+        if extra_lags >= 1:
+            # Clear the shadow-lag block's identity diagonal first — np.eye
+            # left a 1.0 there, which (left in place alongside the shift
+            # entries below) would double-count each shadow-lag state every
+            # step and blow up exponentially instead of just shifting.
+            for j in range(extra_lags):
+                Tmat[base_dim + j, base_dim + j] = 0.0
+            Tmat[base_dim, 0] = 1.0
+            for j in range(1, extra_lags):
+                Tmat[base_dim + j, base_dim + j - 1] = 1.0
+    else:
+        Tmat[0, 0] = params["G0"]
     ADSTOCK_MAP = g.get("ADSTOCK_MAP", {})
     # Per channel now — weibull mode: β_i,t = Σ_l w_l·x_i,t-l + δ_i·f(x_i,t) + synergy
     # (no λ·β_t-1 term — the weighted-lag sum itself supplies the state's
@@ -258,7 +346,13 @@ def _build_process_noise(df, g):
     N_MEDIA = g["N_MEDIA"]; N_COMP = g["N_COMP"]
     N_OWN_NONMEDIA = g["N_OWN_NONMEDIA"]; N_COMP_NONMEDIA = g["N_COMP_NONMEDIA"]
     N_PRICE = g["N_PRICE"]; N_DUMMIES = g["N_DUMMIES"]; SEASONAL_DIM = g["SEASONAL_DIM"]
-    dim = 1 + N_MEDIA + N_COMP + N_OWN_NONMEDIA + N_COMP_NONMEDIA + N_PRICE + N_DUMMIES + SEASONAL_DIM
+    dim = _base_state_dim(g) + _intercept_extra_lags(g)
+    # Intercept Weibull shadow-lag states (indices base_dim..dim-1, if any)
+    # keep the default 1e-6 (effectively frozen) below — they're exact
+    # deterministic shift-copies of a previous slot via Tmat, not
+    # independently-noisy states, mirroring how weibull-adstocked media
+    # betas' own Tmat diagonal is 0 (no separate noise source needed
+    # beyond what index 0's Q[0,0] already supplies).
     Q = np.eye(dim) * 1e-6
     target_mean = float(df[g["TARGET_COL"]].mean())
 
@@ -378,7 +472,8 @@ def _prepare_equation(df, g, params, static_cache=None):
     TRANSFORM_TYPE = g["TRANSFORM_TYPE"]
 
     T_len = len(df)
-    dim = 1 + N_MEDIA + N_COMP + N_OWN_NONMEDIA + N_COMP_NONMEDIA + N_PRICE + N_DUMMIES + SEASONAL_DIM
+    base_dim = _base_state_dim(g)
+    dim = base_dim + _intercept_extra_lags(g)
 
     adstocked_media = _precompute_adstocked(df, g, params)
     if static_cache is not None and static_cache.get("L_mat") is not None:
@@ -497,7 +592,7 @@ def _prepare_equation(df, g, params, static_cache=None):
     )
 
     return dict(
-        g=g, params=params, dim=dim, T_len=T_len,
+        g=g, params=params, dim=dim, base_dim=base_dim, T_len=T_len,
         TARGET_COL=TARGET_COL, MEDIA_COLS=MEDIA_COLS, COMP_MEDIA_COLS=COMP_MEDIA_COLS,
         OWN_NONMEDIA_COLS=OWN_NONMEDIA_COLS, COMP_NONMEDIA_COLS=COMP_NONMEDIA_COLS,
         PRICE_COLS=PRICE_COLS, CROSS_MEDIA_PAIRS=CROSS_MEDIA_PAIRS,
@@ -532,6 +627,11 @@ def _initial_state(df, g, params, pc):
 
     x0 = np.zeros(dim)
     x0[0] = df[TARGET_COL].mean() * 0.8
+    # Intercept Weibull shadow-lag states (if any): seed with a flat
+    # history assumption — same starting level as I_t itself.
+    base_dim = pc.get("base_dim", dim)
+    for lag_idx in range(base_dim, dim):
+        x0[lag_idx] = x0[0]
     for i, col in enumerate(MEDIA_COLS):
         x0[i+1] = g["INITIAL_MEDIA_BETAS"].get(col, 0.0)
     for j, col in enumerate(COMP_MEDIA_COLS):

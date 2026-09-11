@@ -535,8 +535,11 @@ def render_tab4():
                 ),
             )
             st.caption(
-                f"📐 Weibull PDF: w_lag = (k/λ) · ((lag+1)/λ)^(k−1) · exp(−((lag+1)/λ)^k), "
-                f"normalised over lag = 0…{n_lags} ({n_lags + 1} weights). "
+                f"📐 Weibull (CDF-interval mass): w_lag = S(lag) − S(lag+1), where "
+                f"S(x) = exp(−(x/λ)^k) is the Weibull survival function — i.e. the "
+                f"actual probability mass falling in each unit lag interval, not a "
+                f"point-sample of the density. Normalised over lag = 0…{n_lags} "
+                f"({n_lags + 1} weights). "
                 "Parameters **shape k** and **scale λ** are fitted per channel "
                 "(set bounds below)."
             )
@@ -586,48 +589,92 @@ def render_tab4():
         st.markdown("#### Intercept Dynamics" + (" — Dependent 1" if (enable_second_dependent and target2) else ""))
         intercept_dynamics_choice = st.radio(
             "Intercept dynamics type" + (f" ({target})" if (enable_second_dependent and target2) else ""),
-            ["With carryover (AR(1) baseline)", "Without carryover (simple regression)"],
+            ["With carryover (AR(1) baseline)", "With carryover (Weibull adstock)", "Without carryover (simple regression)"],
             horizontal=False,
             key="intercept_dynamics_type_radio",
             help=(
                 "Independent of the Intercept Transformation above — this "
                 "controls whether the intercept/baseline PERSISTS from one "
                 "period to the next at all.\n\n"
-                "**With carryover** (default): I_t = G0 · I_{t-1} + "
+                "**With carryover — AR(1)** (default): I_t = G0 · I_{t-1} + "
                 "Σ_k γ_k · f(media_k,t). The baseline has its own AR(1) "
                 "memory (persistence G0), on top of the effector boost.\n\n"
+                "**With carryover — Weibull adstock**: I_t = G0 · Σ_l w_l · "
+                "I_{t-l} + Σ_k γ_k · f(media_k,t). The baseline's memory "
+                "reaches back over several past periods (window set below) "
+                "with Weibull-shaped weights — a delayed/S-curve decay "
+                "instead of AR(1)'s single-lag exponential decay. G0 here "
+                "plays the same overall-persistence role as AR(1)'s G0 "
+                "(fitted, same bounded range), just spread across the "
+                "window via the Weibull shape (also fitted: shape k / "
+                "scale λ, same mechanism as the per-channel Weibull media "
+                "adstock) instead of concentrated at lag 1.\n\n"
                 "**Without carryover**: I_t = I0 + Σ_k γ_k · f(media_k,t). "
                 "A plain regression on the current period's effectors "
                 "around a fitted constant I0 — no dependence on the "
                 "previous period's intercept at all.\n\n"
                 "For a 2-dependent-variable model, cross-intercept coupling "
                 "(φ₁/φ₂) requires BOTH Dependent 1 and Dependent 2 to be on "
-                "carryover dynamics, since that coupling is itself a "
-                "carryover mechanism (it references the OTHER equation's "
-                "PREVIOUS intercept)."
+                "a carryover dynamics (AR(1) OR Weibull), since that "
+                "coupling is itself a carryover mechanism (it references "
+                "the OTHER equation's PREVIOUS intercept)."
             ),
         )
         use_simple_intercept = intercept_dynamics_choice.startswith("Without")
+        use_weibull_intercept = intercept_dynamics_choice.startswith("With carryover (Weibull")
+
+        intercept_weibull_n_lags = 4
+        if use_weibull_intercept:
+            intercept_weibull_n_lags = st.number_input(
+                "Weibull carryover window — number of lags"
+                + (f" ({target})" if (enable_second_dependent and target2) else ""),
+                min_value=1, max_value=52, value=4, step=1,
+                key="intercept_weibull_n_lags_input",
+                help=(
+                    "How many past periods (L) the intercept's Weibull "
+                    "carryover reaches back over: I_t = Σ_{l=1}^{L} w_l · "
+                    "I_{t-l} + effector boost. A fixed window (like the "
+                    "media Weibull adstock's own lag count) — shape k and "
+                    "scale λ are still fitted, this just sets how far back "
+                    "the weighted sum is allowed to look. L=1 degenerates "
+                    "to a single weight of 1.0 (i.e. behaves like plain "
+                    "AR(1), just with two unused fitted shape/scale slots)."
+                ),
+            )
 
         # Dependent 2 gets its OWN independent choice — no longer forced
         # to mirror Dependent 1's. Shown whenever a second dependent is
         # configured, regardless of joint vs. chained mode, since each
         # dependent fits its own intercept equation either way.
         use_simple_intercept_2 = use_simple_intercept  # fallback for single-dependent models
+        use_weibull_intercept_2 = use_weibull_intercept
+        intercept_weibull_n_lags_2 = intercept_weibull_n_lags
         if enable_second_dependent and target2:
             intercept_dynamics_choice_2 = st.radio(
                 f"Intercept dynamics type ({target2})",
-                ["With carryover (AR(1) baseline)", "Without carryover (simple regression)"],
+                ["With carryover (AR(1) baseline)", "With carryover (Weibull adstock)", "Without carryover (simple regression)"],
                 horizontal=False,
                 key="intercept_dynamics_type_radio_2",
                 help=(
                     f"Same choice as above, but for **{target2}**'s own intercept "
                     "equation — the two dependents no longer have to match. "
                     "E.g. Dependent 1 can keep AR(1) carryover while Dependent 2 "
-                    "runs as a plain constant-baseline regression, or vice versa."
+                    "runs as a plain constant-baseline regression or a Weibull "
+                    "multi-lag carryover, or vice versa."
                 ),
             )
             use_simple_intercept_2 = intercept_dynamics_choice_2.startswith("Without")
+            use_weibull_intercept_2 = intercept_dynamics_choice_2.startswith("With carryover (Weibull")
+            if use_weibull_intercept_2:
+                intercept_weibull_n_lags_2 = st.number_input(
+                    f"Weibull carryover window — number of lags ({target2})",
+                    min_value=1, max_value=52, value=4, step=1,
+                    key="intercept_weibull_n_lags_input_2",
+                    help=(
+                        "Same idea as above, for Dependent 2's own intercept "
+                        "equation's Weibull carryover window."
+                    ),
+                )
 
     # ── D1. Cross-intercept coupling direction (2-dependent joint fit only) ──
 
@@ -741,8 +788,12 @@ def render_tab4():
     # single flag; "weibull" only if every eligible channel is weibull.
     adstock_type_str = "weibull" if (adstock_eligible_cols and not instant_channels) else "instant"
     intercept_transform_type_str = "hill" if use_hill_intercept else "power"
-    intercept_dynamics_type_str = "simple" if use_simple_intercept else "carryover"
-    intercept_dynamics_type_2_str = "simple" if use_simple_intercept_2 else "carryover"
+    intercept_dynamics_type_str = (
+        "simple" if use_simple_intercept else "weibull" if use_weibull_intercept else "carryover"
+    )
+    intercept_dynamics_type_2_str = (
+        "simple" if use_simple_intercept_2 else "weibull" if use_weibull_intercept_2 else "carryover"
+    )
 
     f_label = "Hill(x_{i,t})" if use_hill else "x_{i,t}^n"
     if use_weibull:
@@ -764,7 +815,11 @@ def render_tab4():
 
     st.info(f"**Active state equation:** {eq_text}\n\n*{params_text}*")
 
-    _intercept_lead = "I0" if use_simple_intercept else "G₀ · I_{t-1}"
+    _intercept_lead = (
+        "I0" if use_simple_intercept
+        else f"G0 · Σ_l w_l · I_{{t-l}}  (L={intercept_weibull_n_lags})" if use_weibull_intercept
+        else "G₀ · I_{t-1}"
+    )
     if use_hill_intercept:
         intercept_eq_text = (
             f"I_t = {_intercept_lead} + Σ_k γ_k · "
@@ -774,12 +829,20 @@ def render_tab4():
         intercept_eq_text = (
             f"I_t = {_intercept_lead} + Σ_k γ_k · media_k,t^{{n_k}}   *(Power)*"
         )
-    _dynamics_label = "Simple / no carryover" if use_simple_intercept else "With carryover"
+    _dynamics_label = (
+        "Simple / no carryover" if use_simple_intercept
+        else "With Weibull carryover" if use_weibull_intercept
+        else "With carryover"
+    )
     _dep1_or_both_label = f"({target})" if (enable_second_dependent and target2) else ""
     st.markdown(f"**Intercept state {_dep1_or_both_label} ({_dynamics_label}):** {intercept_eq_text}")
 
     if enable_second_dependent and target2:
-        _dynamics_label_2 = "Simple / no carryover" if use_simple_intercept_2 else "With carryover"
+        _dynamics_label_2 = (
+            "Simple / no carryover" if use_simple_intercept_2
+            else f"With Weibull carryover (L={intercept_weibull_n_lags_2})" if use_weibull_intercept_2
+            else "With carryover"
+        )
         st.markdown(f"**Intercept state ({target2}) ({_dynamics_label_2})**")
 
     if enable_second_dependent and target2 and dependent_relationship == "joint" \
@@ -1020,6 +1083,8 @@ def render_tab4():
                 "intercept_transform_type": intercept_transform_type_str,
                 "intercept_dynamics_type": intercept_dynamics_type_str,
                 "intercept_dynamics_type_2": intercept_dynamics_type_2_str,
+                "intercept_weibull_n_lags": int(intercept_weibull_n_lags),
+                "intercept_weibull_n_lags_2": int(intercept_weibull_n_lags_2),
                 "cross_intercept_coupling_mode": cross_intercept_coupling_mode_str,
                 "loss_function_mode": loss_function_mode_str,
                 "adstock_n_lags": int(n_lags),

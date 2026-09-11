@@ -28,7 +28,7 @@ import pandas as pd
 from openpyxl.styles import Font, PatternFill, Alignment
 from openpyxl.utils import get_column_letter
 
-from modules.transforms import apply_transformation
+from modules.transforms import apply_transformation, adstock_weibull_lagged
 
 
 def _build_variable_index(g):
@@ -91,7 +91,20 @@ def build_intercept_decomposition_df(res, df_full):
     prev_intercept = np.empty(T)
     prev_intercept[1:] = x_smooth[:-1, 0]
     prev_intercept[0]  = x_smooth[0, 0]
-    intercept_carryover = G0 * prev_intercept
+    if INTERCEPT_DYNAMICS_TYPE == "weibull":
+        # Same multi-lag Weibull weighted-lag sum as the media adstock,
+        # recomputed directly on the smoothed intercept series, scaled by
+        # G0 — see the identical note in
+        # modules/pipeline.py::build_contribution_df.
+        n_lags_i = int(g.get("INTERCEPT_WEIBULL_N_LAGS", 4))
+        intercept_carryover = G0 * adstock_weibull_lagged(
+            pd.Series(x_smooth[:, 0]),
+            float(params.get("intercept_weibull_shape", 1.5)),
+            float(params.get("intercept_weibull_scale", 1.0)),
+            n_lags_i,
+        )
+    else:
+        intercept_carryover = G0 * prev_intercept
     intercept_at_t = x_smooth[:, 0]
 
     data = {"Period": np.arange(T)}

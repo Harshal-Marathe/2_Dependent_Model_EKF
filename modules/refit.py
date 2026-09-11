@@ -182,6 +182,10 @@ def _block_slices(g: dict):
     add("Ls", N_MEDIA, cols=g["MEDIA_COLS"])
     if INTERCEPT_DYNAMICS_TYPE == "simple":
         add("I0", 1, scalar=True)
+    elif INTERCEPT_DYNAMICS_TYPE == "weibull":
+        add("G0", 1, scalar=True)
+        add("intercept_weibull_shape", 1, scalar=True)
+        add("intercept_weibull_scale", 1, scalar=True)
     else:
         add("G0", 1, scalar=True)
     add("delta", N_MEDIA, cols=g["MEDIA_COLS"])
@@ -262,6 +266,15 @@ def build_warm_started_theta(g_new, theta0_default, bounds_default,
                 # "global intercept" knob for this dynamics mode).
                 lo, hi = _bound_clip(bounds[start])
                 val = float(np.clip(prev_params["I0"], lo, hi))
+                theta0[start] = val
+                if freeze_existing and not refit_G0:
+                    bounds[start] = (val, val)
+            elif name in ("intercept_weibull_shape", "intercept_weibull_scale") and name in prev_params:
+                # Weibull multi-lag intercept dynamics' shape/scale —
+                # same warm-start/freeze treatment as G0/I0 above, gated
+                # by the same refit_G0 checkbox.
+                lo, hi = _bound_clip(bounds[start])
+                val = float(np.clip(prev_params[name], lo, hi))
                 theta0[start] = val
                 if freeze_existing and not refit_G0:
                     bounds[start] = (val, val)
