@@ -20,7 +20,7 @@ import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 
 from modules.ui_helpers import section, need_model, safe_multiselect
-from modules.transforms import hill_transform, power_transform, apply_transformation
+from modules.transforms import hill_transform, power_transform, apply_transformation, weibull_lag_weights
 from modules.exports import build_betas_df, build_master_workbook_bytes, build_full_results_zip_bytes
 
 
@@ -741,6 +741,22 @@ def render_full_results(df, config, res, target, key_prefix="", pcb_key="per_cha
     st.download_button("📥 Download Parameters",
                        param_df.to_csv(index=False).encode(), "parameters.csv", "text/csv",
                        key=f"{kp}dl_params")
+
+    if g.get("INTERCEPT_DYNAMICS_TYPE", "carryover") == "weibull":
+        _iw_params = res["params"]
+        _iw_L = int(g.get("INTERCEPT_WEIBULL_N_LAGS", 4))
+        _iw_k = float(_iw_params.get("intercept_weibull_shape", 1.5))
+        _iw_lam = float(_iw_params.get("intercept_weibull_scale", 1.0))
+        _iw_w = weibull_lag_weights(_iw_k, _iw_lam, _iw_L)
+        _iw_df = pd.DataFrame({
+            "Lag": [f"t-{l}" for l in range(1, _iw_L + 1)],
+            "Weight": _iw_w,
+        })
+        fig_iw = px.bar(_iw_df, x="Lag", y="Weight",
+                         title=f"Intercept Weibull carryover weights (k={_iw_k:.3f}, λ={_iw_lam:.3f}) — "
+                               f"sum = {_iw_w.sum():.4f}")
+        fig_iw.update_layout(height=300, template="plotly_white")
+        st.plotly_chart(fig_iw, use_container_width=True, key=f"{kp}fig_iw_weights")
 
     st.markdown("### G · ROI Analytics")
     roi_df = res["roi_df"]

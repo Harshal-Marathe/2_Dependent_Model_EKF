@@ -367,6 +367,20 @@ def _postprocess_equation(df_full, g, params, x_smooth, adstocked_media,
         param_rows.append({"Category":"Global","Variable":"Intercept","Parameter":"Intercept Weibull shape k","Value":params.get("intercept_weibull_shape", 1.5)})
         param_rows.append({"Category":"Global","Variable":"Intercept","Parameter":"Intercept Weibull scale λ","Value":params.get("intercept_weibull_scale", 1.0)})
         param_rows.append({"Category":"Global","Variable":"Intercept","Parameter":"Intercept Weibull n_lags","Value":g.get("INTERCEPT_WEIBULL_N_LAGS", 4)})
+        # Individual normalised per-lag weights w_1..w_L (sum to 1) — the
+        # actual numbers the shape/scale above translate into for the
+        # I_t = Σ_l w_l·I_(t-l) sum. See modules/transforms.py::weibull_lag_weights.
+        from modules.transforms import weibull_lag_weights
+        _iw_L = int(g.get("INTERCEPT_WEIBULL_N_LAGS", 4))
+        _iw_w = weibull_lag_weights(
+            float(params.get("intercept_weibull_shape", 1.5)),
+            float(params.get("intercept_weibull_scale", 1.0)),
+            _iw_L,
+        )
+        for _l, _wl in enumerate(_iw_w, start=1):
+            param_rows.append({"Category":"Global","Variable":"Intercept",
+                                "Parameter": f"Intercept Weibull weight w_{_l} (lag {_l})",
+                                "Value": float(_wl)})
     else:
         param_rows.append({"Category":"Global","Variable":"Intercept","Parameter":"G0",     "Value":params["G0"]})
     param_rows.append({"Category":"Global","Variable":"Noise",    "Parameter":"sigma_y","Value":params["sigma_y"]})
