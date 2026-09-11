@@ -315,4 +315,91 @@ def build_normalized_problem(theta0, bounds, floor=1e-3, unbounded_mult=20.0):
     def unscale(theta_norm):
         return lo_ref + np.asarray(theta_norm) * width
 
-    return theta0_norm, norm_bounds, unscale
+    def scale(theta_real):
+        """
+        Inverse of `unscale`: maps a REAL-units theta vector into this
+        same normalized space. Used to bring an already-fitted theta
+        (e.g. the optimizer's result) into the identical normalized
+        coordinates theta0_norm lives in, so the two can be compared
+        dimension-by-dimension on a common, proportionate scale (see
+        modules/pipeline.py's "did this parameter actually move from its
+        initial guess" diagnostic). Deliberately NOT clipped to [0, 1] —
+        an unbounded dimension's normalized value can legitimately land
+        outside the [0, 1] window the optimizer started in if the fit
+        walked further than that window from theta0.
+        """
+        return (np.asarray(theta_real, dtype=float) - lo_ref) / width
+
+    return theta0_norm, norm_bounds, unscale, scale
+
+
+def theta_param_labels(g: dict):
+    """
+    Human-readable label for every slot in the flat theta vector, in
+    EXACTLY the same order _build_theta0_and_bounds() assembles
+    theta0/bounds (and unpack_theta() reads them back in). Used purely
+    for diagnostics/display (e.g. "which parameters barely moved from
+    their initial guess") — never for anything that affects optimization
+    itself, so a label mistake here can't silently corrupt a fit.
+    """
+    MEDIA_COLS          = g["MEDIA_COLS"]
+    COMP_MEDIA_COLS      = g["COMP_MEDIA_COLS"]
+    OWN_NONMEDIA_COLS    = g["OWN_NONMEDIA_COLS"]
+    COMP_NONMEDIA_COLS   = g["COMP_NONMEDIA_COLS"]
+    PRICE_COLS           = g["PRICE_COLS"]
+    INTERCEPT_EFFECTORS  = g["INTERCEPT_EFFECTORS"]
+    ADSTOCK_WEIBULL_COLS = g.get("ADSTOCK_WEIBULL_COLS", [])
+    CROSS_MEDIA_PAIRS    = g.get("CROSS_MEDIA_PAIRS", [])
+    N_OWN_NONMEDIA = g["N_OWN_NONMEDIA"]; N_COMP_NONMEDIA = g["N_COMP_NONMEDIA"]
+    N_COMP = g["N_COMP"]; N_PRICE = g["N_PRICE"]
+    USE_ORGANIC_DRIFT = g["USE_ORGANIC_DRIFT"]
+    INTERCEPT_DYNAMICS_TYPE = g.get("INTERCEPT_DYNAMICS_TYPE", "carryover")
+
+    labels = []
+    labels += [f"Ls · {c}" for c in MEDIA_COLS]
+
+    if INTERCEPT_DYNAMICS_TYPE == "simple":
+        labels += ["I0"]
+    elif INTERCEPT_DYNAMICS_TYPE == "weibull":
+        labels += ["Intercept Weibull shape k", "Intercept Weibull scale λ"]
+    else:
+        labels += ["G0"]
+
+    labels += [f"Delta · {c}" for c in MEDIA_COLS]
+    labels += [f"Gamma · {c}" for c in INTERCEPT_EFFECTORS]
+    labels += [f"n · {c}" for c in MEDIA_COLS]
+    labels += [f"S · {c}" for c in MEDIA_COLS]
+    labels += [f"n_intercept · {c}" for c in INTERCEPT_EFFECTORS]
+    labels += [f"S_intercept · {c}" for c in INTERCEPT_EFFECTORS]
+    labels += [f"Adstock shape k · {c}" for c in ADSTOCK_WEIBULL_COLS]
+    labels += [f"Adstock scale λ · {c}" for c in ADSTOCK_WEIBULL_COLS]
+
+    if N_OWN_NONMEDIA:
+        labels += [f"Ls · {c}" for c in OWN_NONMEDIA_COLS]
+    if N_COMP_NONMEDIA:
+        labels += [f"Ls_comp · {c}" for c in COMP_NONMEDIA_COLS]
+    if N_OWN_NONMEDIA:
+        labels += [f"Delta · {c}" for c in OWN_NONMEDIA_COLS]
+    labels += [f"Delta_comp · {c}" for c in COMP_NONMEDIA_COLS]
+
+    if N_COMP:
+        labels += [f"Ls_comp · {c}" for c in COMP_MEDIA_COLS]
+    labels += [f"Delta_comp · {c}" for c in COMP_MEDIA_COLS]
+    labels += [f"n_comp · {c}" for c in COMP_MEDIA_COLS]
+    if COMP_MEDIA_COLS:
+        labels += [f"S_comp · {c}" for c in COMP_MEDIA_COLS]
+
+    labels += [f"Cross Delta · {src}→{tgt}" for (tgt, src) in CROSS_MEDIA_PAIRS]
+    labels += [f"Cross n · {src}→{tgt}" for (tgt, src) in CROSS_MEDIA_PAIRS]
+    labels += [f"Cross S · {src}→{tgt}" for (tgt, src) in CROSS_MEDIA_PAIRS]
+
+    if N_PRICE:
+        labels += [f"Ls_price · {c}" for c in PRICE_COLS]
+    labels += [f"Delta_price · {c}" for c in PRICE_COLS]
+
+    if USE_ORGANIC_DRIFT:
+        labels += ["mu (organic drift)"]
+
+    labels += ["sigma_y"]
+
+    return labels

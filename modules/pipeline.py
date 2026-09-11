@@ -15,12 +15,13 @@ Two entry points:
 
 import numpy as np
 import pandas as pd
-from scipy.optimize import minimize
 
 from modules.dependencies import NEVERGRAD_AVAILABLE
 from modules.params import _make_globals, unpack_theta
-from modules.bounds import _build_theta0_and_bounds, build_normalized_problem
-from modules.optimizer import run_nevergrad_optimizer, run_nevergrad_optimizer_joint
+from modules.bounds import _build_theta0_and_bounds, build_normalized_problem, theta_param_labels
+from modules.optimizer import (
+    run_nevergrad_optimizer, run_nevergrad_optimizer_joint, run_multistart_local_optimizer,
+)
 from modules.kalman import (
     run_kalman_filter, run_bivariate_kalman_filter, rts_smoother,
     _precompute_adstocked, _build_observation_matrix, build_static_cache,
@@ -407,7 +408,7 @@ def _postprocess_equation(df_full, g, params, x_smooth, adstocked_media,
 
 # ── Single-dependent-variable pipeline (univariate RBE) ──────────────────────
 
-def run_full_ekf_pipeline(df_full, config, max_iter, method, ng_cfg=None):
+def run_full_ekf_pipeline(df_full, config, max_iter, method, ng_cfg=None, n_restarts=1):
     g = _make_globals(config)
     n_train  = config["n_train"]
     df_train = df_full.iloc[:n_train].copy().reset_index(drop=True)
@@ -417,6 +418,13 @@ def run_full_ekf_pipeline(df_full, config, max_iter, method, ng_cfg=None):
     # being searched over — build it once per optimization run instead of
     # on every single candidate evaluation.
     static_cache_train = build_static_cache(df_train, g)
+
+    # Always build the normalized-space mapping, even on the Nevergrad
+    # path — it costs nothing and gives us a `scale` function to bring
+    # whichever theta comes back (from either optimizer) into the same
+    # normalized units theta0 lives in, for the "did this parameter
+    # actually move from its initial guess" diagnostic below.
+    theta0_norm, norm_bounds, unscale, scale = build_normalized_problem(theta0, bounds)
 
     if method == "Nevergrad" and NEVERGRAD_AVAILABLE and ng_cfg:
         best_theta, _ = run_nevergrad_optimizer(df_train, g, theta0, bounds, ng_cfg,
@@ -430,17 +438,21 @@ def run_full_ekf_pipeline(df_full, config, max_iter, method, ng_cfg=None):
         # leaves small-range parameters like `n` stuck exactly at their
         # init value — their true gradient signal is below the numerical
         # noise floor of the Kalman recursion at the default step size.
-        theta0_norm, norm_bounds, unscale = build_normalized_problem(theta0, bounds)
-
+        #
+        # On top of that, `n_restarts` > 1 hedges against a DIFFERENT
+        # failure mode: theta0 itself sitting in a flat/insensitive
+        # region for some dimension, where even a perfectly-scaled
+        # gradient step finds no signal to move. See
+        # modules/optimizer.py::run_multistart_local_optimizer.
         def objective(theta_norm):
             theta = unscale(theta_norm)
             p = unpack_theta(theta, g)
             _, _, _, _, _, _, _, _, loglik = run_kalman_filter(
                 df_train, p, g, static_cache=static_cache_train)
             return -loglik
-        opt = minimize(objective, theta0_norm, method=method,
-                       bounds=norm_bounds,
-                       options={"maxiter": max_iter, "ftol": 1e-9, "eps": 1e-6})
+        opt, _all_opts, _best_idx = run_multistart_local_optimizer(
+            objective, theta0_norm, norm_bounds, method, max_iter,
+            n_restarts=n_restarts, progress_label=f"{method} optimization")
         best_theta = unscale(opt.x); opt_success = opt.success; opt_nit = opt.nit
 
     params = unpack_theta(best_theta, g)
@@ -455,12 +467,19 @@ def run_full_ekf_pipeline(df_full, config, max_iter, method, ng_cfg=None):
         opt_success, opt_nit, loglik, n_train=n_train,
     )
     result["P_smooth"] = P_smooth
+    # ── Multi-start / stuck-at-init diagnostics (Tab 6 flags these) ──────
+    result["theta0"]        = theta0
+    result["theta_fitted"]  = best_theta
+    result["theta0_norm"]   = theta0_norm
+    result["theta_fitted_norm"] = scale(best_theta)
+    result["theta_labels"]  = theta_param_labels(g)
+    result["n_restarts"]    = int(n_restarts) if not (method == "Nevergrad" and NEVERGRAD_AVAILABLE and ng_cfg) else 1
     return result
 
 
 # ── Multi-dependent pipeline — now a genuine JOINT bivariate fit ────────────
 
-def run_multi_dependent_pipeline(df_full, config, max_iter, method, ng_cfg=None):
+def run_multi_dependent_pipeline(df_full, config, max_iter, method, ng_cfg=None, n_restarts=1):
     """
     Fits Dependent 1 (config["target"]) and, if a second dependent variable
     is configured (config["target2"], e.g. Top-of-Mind / Consideration),
@@ -506,7 +525,8 @@ def run_multi_dependent_pipeline(df_full, config, max_iter, method, ng_cfg=None)
     """
     target2 = config.get("target2")
     if not (config.get("enable_second_dependent") and target2):
-        results_1 = run_full_ekf_pipeline(df_full, config, max_iter, method, ng_cfg=ng_cfg)
+        results_1 = run_full_ekf_pipeline(df_full, config, max_iter, method, ng_cfg=ng_cfg,
+                                           n_restarts=n_restarts)
         return results_1, None
 
     # ── Build per-equation configs / globals ─────────────────────────
@@ -659,6 +679,12 @@ def run_multi_dependent_pipeline(df_full, config, max_iter, method, ng_cfg=None)
     if loss_function_mode == "nll_only":
         lambda_reg = 0.0
 
+    # Same normalization mapping as the single-dependent path — computed
+    # unconditionally (cheap) so we have `scale_joint` on hand afterward
+    # for the stuck-at-init diagnostic, regardless of which optimizer ran.
+    theta0_joint_norm, norm_bounds_joint, unscale_joint, scale_joint = build_normalized_problem(
+        theta0_joint, bounds_joint)
+
     if method == "Nevergrad" and NEVERGRAD_AVAILABLE and ng_cfg:
         best_theta_joint, _ = run_nevergrad_optimizer_joint(
             df_train, g1, g2, theta0_joint, bounds_joint, n1, n2, ng_cfg,
@@ -669,10 +695,12 @@ def run_multi_dependent_pipeline(df_full, config, max_iter, method, ng_cfg=None)
         # Same normalization fix as the single-dependent path above (see
         # modules/bounds.py::build_normalized_problem) — theta_joint mixes
         # the same wide-scale parameters (twice over, once per dependent
-        # variable) plus rho/phi, so it needs it just as much.
-        theta0_joint_norm, norm_bounds_joint, unscale_joint = build_normalized_problem(
-            theta0_joint, bounds_joint)
-
+        # variable) plus rho/phi, so it needs it just as much. On top of
+        # that, `n_restarts` > 1 multi-starts this joint local search the
+        # same way as the single-dependent path (see
+        # modules/optimizer.py::run_multistart_local_optimizer) — a flat
+        # region around theta0_joint in delta/n/gamma is just as possible
+        # here as in the univariate case, for either equation.
         def objective(theta_joint_norm):
             theta_joint = unscale_joint(theta_joint_norm)
             theta1 = theta_joint[:n1]
@@ -689,9 +717,9 @@ def run_multi_dependent_pipeline(df_full, config, max_iter, method, ng_cfg=None)
                 df_train, p1, g1, p2, g2, rho, phi1, phi2, lambda_reg,
                 static_cache1=static_cache1_train, static_cache2=static_cache2_train)
             return loss
-        opt = minimize(objective, theta0_joint_norm, method=method,
-                        bounds=norm_bounds_joint,
-                        options={"maxiter": max_iter, "ftol": 1e-9, "eps": 1e-6})
+        opt, _all_opts, _best_idx = run_multistart_local_optimizer(
+            objective, theta0_joint_norm, norm_bounds_joint, method, max_iter,
+            n_restarts=n_restarts, progress_label=f"{method} joint optimization")
         best_theta_joint = unscale_joint(opt.x); opt_success = opt.success; opt_nit = opt.nit
 
     best_theta1 = best_theta_joint[:n1]
@@ -731,6 +759,23 @@ def run_multi_dependent_pipeline(df_full, config, max_iter, method, ng_cfg=None)
         opt_success, opt_nit, joint_loglik, n_train=n_train,
     )
 
+    # ── Multi-start / stuck-at-init diagnostics (Tab 6 flags these) ──────
+    # Per-equation, normalized in that equation's OWN theta0/bounds space
+    # (theta0_1/bounds1, theta0_2/bounds2) — simpler and just as valid as
+    # normalizing in the full joint space, since rho/phi aren't per-
+    # channel parameters a person would look at this flag for anyway.
+    _theta0_1_norm, _nb1, _unsc1, _sc1 = build_normalized_problem(theta0_1, bounds1)
+    _theta0_2_norm, _nb2, _unsc2, _sc2 = build_normalized_problem(theta0_2, bounds2)
+    results_1["theta0"] = theta0_1; results_1["theta_fitted"] = best_theta1
+    results_1["theta0_norm"] = _theta0_1_norm; results_1["theta_fitted_norm"] = _sc1(best_theta1)
+    results_1["theta_labels"] = theta_param_labels(g1)
+    results_2["theta0"] = theta0_2; results_2["theta_fitted"] = best_theta2
+    results_2["theta0_norm"] = _theta0_2_norm; results_2["theta_fitted_norm"] = _sc2(best_theta2)
+    results_2["theta_labels"] = theta_param_labels(g2)
+    _n_restarts_used = 1 if (method == "Nevergrad" and NEVERGRAD_AVAILABLE and ng_cfg) else int(n_restarts)
+    results_1["n_restarts"] = _n_restarts_used
+    results_2["n_restarts"] = _n_restarts_used
+
     # NRMSE regularization diagnostics, evaluated on the FULL dataset with
     # the fitted params (same pattern as joint_loglik above) — lets the
     # Results tab show what the regularizer actually saw, even though the
@@ -756,7 +801,7 @@ def run_multi_dependent_pipeline(df_full, config, max_iter, method, ng_cfg=None)
 
 # ── Chained / sequential pipeline — Dependent 2 feeds Dependent 1 as x_t ────
 
-def run_chained_dependent_pipeline(df_full, config, max_iter, method, ng_cfg=None):
+def run_chained_dependent_pipeline(df_full, config, max_iter, method, ng_cfg=None, n_restarts=1):
     """
     Chained (mediation-style) two-stage fit, as an alternative to the joint
     bivariate fit above.
@@ -800,7 +845,8 @@ def run_chained_dependent_pipeline(df_full, config, max_iter, method, ng_cfg=Non
     """
     target2 = config.get("target2")
     if not (config.get("enable_second_dependent") and target2):
-        results_1 = run_full_ekf_pipeline(df_full, config, max_iter, method, ng_cfg=ng_cfg)
+        results_1 = run_full_ekf_pipeline(df_full, config, max_iter, method, ng_cfg=ng_cfg,
+                                           n_restarts=n_restarts)
         return results_1, None, df_full, None
 
     # ── Stage 1: fit Dependent 2 completely on its own ───────────────────
@@ -838,7 +884,8 @@ def run_chained_dependent_pipeline(df_full, config, max_iter, method, ng_cfg=Non
     if pcb_2:
         config_2["per_channel_bounds"] = pcb_2
 
-    results_2 = run_full_ekf_pipeline(df_full, config_2, max_iter, method, ng_cfg=ng_cfg)
+    results_2 = run_full_ekf_pipeline(df_full, config_2, max_iter, method, ng_cfg=ng_cfg,
+                                       n_restarts=n_restarts)
 
     # ── Stage 2: inject Dependent 2's output as an x-driver, fit Dep 1 ───
     use_fitted  = config.get("chain_use_fitted", True)
@@ -882,7 +929,8 @@ def run_chained_dependent_pipeline(df_full, config, max_iter, method, ng_cfg=Non
     adstock_map.setdefault(driver_col, "instant")
     config_1["adstock_map"] = adstock_map
 
-    results_1 = run_full_ekf_pipeline(df_with_driver, config_1, max_iter, method, ng_cfg=ng_cfg)
+    results_1 = run_full_ekf_pipeline(df_with_driver, config_1, max_iter, method, ng_cfg=ng_cfg,
+                                       n_restarts=n_restarts)
     results_1["chained_from_dep2"] = True
     results_1["chain_driver_col"]  = driver_col
     results_1["chain_use_fitted"]  = use_fitted

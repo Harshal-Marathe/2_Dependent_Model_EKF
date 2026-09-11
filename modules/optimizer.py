@@ -6,7 +6,8 @@ Loss = -loglik   (identical objective to the L-BFGS-B / SLSQP path)
 
 import numpy as np
 import streamlit as st
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from scipy.optimize import minimize
 
 from modules.params import unpack_theta
 from modules.bounds import build_normalized_problem
@@ -91,6 +92,123 @@ def _ng_bounds_arrays(norm_bounds, sentinel=100.0):
     return lows, highs
 
 
+# ── Multi-start local optimization (L-BFGS-B / SLSQP) ───────────────────────
+#
+# A single scipy.optimize.minimize call from one fixed theta0 can get stuck
+# exactly at (or very near) its starting point in some dimensions if the
+# loglik surface is flat/insensitive there around theta0 — the optimizer
+# reads "no local gradient signal" as "already at the optimum" even when a
+# real, better optimum exists elsewhere in the search space. Restarting the
+# SAME local optimizer from several different (randomized) starting points
+# and keeping whichever restart reaches the best loglik directly tests
+# whether that's actually true, instead of just trusting the one run that
+# happened to start at theta0.
+
+def _jittered_normalized_starts(theta0_norm, norm_bounds, n_starts, seed=42):
+    """
+    Builds `n_starts` starting points in the SAME normalized theta space
+    scipy's L-BFGS-B/SLSQP already searches in (see
+    modules/bounds.py::build_normalized_problem).
+
+    Start 0 is always the exact, unperturbed theta0_norm — so multi-start
+    can never do WORSE than the original single-start fit, only find
+    something better (or confirm theta0 already was the optimum). Starts
+    1..n_starts-1 are randomized:
+      - Fully-bounded normalized dims (already scaled to exactly [0, 1])
+        are drawn uniformly across the whole [0, 1] box — a genuine
+        global restart for that dimension, not just a small nudge.
+      - Partially/unbounded dims (no finite normalized box to sample
+        uniformly from) are jittered around theta0_norm with Gaussian
+        noise in normalized units, then clipped back to whatever real
+        bound does exist on that side (if any).
+    """
+    rng = np.random.default_rng(seed)
+    theta0_norm = np.asarray(theta0_norm, dtype=float)
+    starts = [theta0_norm.copy()]
+    n = len(theta0_norm)
+    for _ in range(max(0, n_starts - 1)):
+        cand = np.empty(n)
+        for i, (lo, hi) in enumerate(norm_bounds):
+            x0 = theta0_norm[i]
+            if lo is not None and hi is not None:
+                cand[i] = rng.uniform(lo, hi)
+            else:
+                val = x0 + rng.normal(0.0, 0.5)
+                if lo is not None:
+                    val = max(val, lo)
+                if hi is not None:
+                    val = min(val, hi)
+                cand[i] = val
+        starts.append(cand)
+    return starts
+
+
+def run_multistart_local_optimizer(objective, theta0_norm, norm_bounds, method, max_iter,
+                                    n_restarts=1, seed=42, max_workers=None,
+                                    progress_label="Local optimizer"):
+    """
+    Runs scipy.optimize.minimize (L-BFGS-B or SLSQP) from `n_restarts`
+    different starting points — theta0_norm itself, plus `n_restarts - 1`
+    randomized ones (see `_jittered_normalized_starts`) — and returns the
+    best-loglik result across all of them.
+
+    Restarts are independent optimizer runs, so they're run concurrently
+    via a thread pool (same ask/evaluate/tell parallelization pattern
+    `_ask_eval_tell_loop` already uses for Nevergrad's `num_workers`) —
+    N restarts costs roughly N/max_workers wall-clock time, not N×.
+
+    Returns
+    -------
+    (best_opt, all_opts, best_idx)
+        best_opt  : the scipy OptimizeResult with the lowest `.fun` across
+            all restarts.
+        all_opts  : every restart's OptimizeResult, in start order (index 0
+            is always the unperturbed-theta0 restart).
+        best_idx  : index into all_opts/starts of the winning restart —
+            0 means "theta0 itself was already the best start found",
+            >0 means a randomized restart found something better.
+    """
+    n_restarts = max(1, int(n_restarts))
+    starts = _jittered_normalized_starts(theta0_norm, norm_bounds, n_restarts, seed=seed)
+    if max_workers is None:
+        max_workers = min(len(starts), 8)
+
+    def _run_one(x0):
+        return minimize(objective, x0, method=method, bounds=norm_bounds,
+                         options={"maxiter": max_iter, "ftol": 1e-9, "eps": 1e-6})
+
+    results = [None] * len(starts)
+    completed = 0
+    progress = None
+    if len(starts) > 1:
+        progress = st.progress(0, text=f"{progress_label} — 0/{len(starts)} restarts")
+
+    if len(starts) == 1 or max_workers <= 1:
+        for i, x0 in enumerate(starts):
+            results[i] = _run_one(x0)
+            completed += 1
+            if progress is not None:
+                progress.progress(int(completed / len(starts) * 100),
+                                   text=f"{progress_label} — {completed}/{len(starts)} restarts")
+    else:
+        with ThreadPoolExecutor(max_workers=max_workers) as executor:
+            future_to_idx = {executor.submit(_run_one, x0): i for i, x0 in enumerate(starts)}
+            for future in as_completed(future_to_idx):
+                i = future_to_idx[future]
+                results[i] = future.result()
+                completed += 1
+                progress.progress(int(completed / len(starts) * 100),
+                                   text=f"{progress_label} — {completed}/{len(starts)} restarts")
+
+    best_idx = int(np.argmin([r.fun for r in results]))
+    best_opt = results[best_idx]
+    if progress is not None:
+        origin = "theta0 (unperturbed)" if best_idx == 0 else f"random restart #{best_idx}"
+        progress.progress(100, text=(f"✅ {progress_label} done — best loss {best_opt.fun:.4f} "
+                                      f"from {origin} ({len(starts)} restarts total)"))
+    return best_opt, results, best_idx
+
+
 def run_nevergrad_optimizer(df_train, g, theta0, bounds, ng_cfg, static_cache=None):
     import nevergrad as ng
     strategy_name = ng_cfg.get("strategy", "NGOpt"); budget = ng_cfg.get("budget", 500)
@@ -109,7 +227,7 @@ def run_nevergrad_optimizer(df_train, g, theta0, bounds, ng_cfg, static_cache=No
     # whole loglik surface for everything else. Normalizing first makes
     # every dimension's search box proportionate, the same way it already
     # fixed L-BFGS-B/SLSQP.
-    theta0_norm, norm_bounds, unscale = build_normalized_problem(theta0, bounds)
+    theta0_norm, norm_bounds, unscale, _scale = build_normalized_problem(theta0, bounds)
     lows, highs = _ng_bounds_arrays(norm_bounds)
     param = ng.p.Array(init=theta0_norm).set_bounds(lows, highs)
     optimizer_cls = getattr(ng.optimizers, strategy_name, None) or ng.optimizers.NGOpt
@@ -195,7 +313,7 @@ def run_nevergrad_optimizer_joint(df_train, g1, g2, theta0_joint, bounds_joint, 
         static_cache2 = build_static_cache(df_train, g2)
 
     # Same normalization fix as run_nevergrad_optimizer above.
-    theta0_joint_norm, norm_bounds_joint, unscale_joint = build_normalized_problem(
+    theta0_joint_norm, norm_bounds_joint, unscale_joint, _scale_joint = build_normalized_problem(
         theta0_joint, bounds_joint)
     lows, highs = _ng_bounds_arrays(norm_bounds_joint)
     param = ng.p.Array(init=theta0_joint_norm).set_bounds(lows, highs)

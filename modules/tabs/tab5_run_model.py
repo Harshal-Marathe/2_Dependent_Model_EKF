@@ -125,9 +125,21 @@ def render_tab5(nevergrad_available: bool):
         ng_cfg = {
             "strategy": ng_strategy, "budget": int(ng_budget), "num_workers": int(ng_workers),
         }
-    else:
-        col1, _ = st.columns(2)
+    n_restarts = 1  # multi-start currently applies to the local (scipy) optimizers only
+    if method != "Nevergrad":
+        col1, col2 = st.columns(2)
         with col1: max_iter = st.number_input("Max iterations", 100, 5000, 800, 100)
+        with col2:
+            n_restarts = st.number_input(
+                "Restarts (multi-start)", 1, 20, 1, 1,
+                help="Re-run the optimizer from this many starting points "
+                     "(theta0 itself, plus randomized ones) and keep the "
+                     "best-loglik result. Helps catch parameters that get "
+                     "stuck exactly at their initial guess because the "
+                     "loglik surface is flat around theta0 — 1 restart is "
+                     "the original single-start behaviour. Restarts run "
+                     "concurrently, so wall-clock time grows sub-linearly, "
+                     "not N×.")
 
     if st.button("🚀 Run RBE MMM", type="primary", use_container_width=True):
         joint_active = bool(config.get("enable_second_dependent") and config.get("target2"))
@@ -141,7 +153,8 @@ def render_tab5(nevergrad_available: bool):
             try:
                 if chained_mode:
                     results_1, results_2, df_with_driver, driver_col = \
-                        run_chained_dependent_pipeline(df, config, max_iter, method, ng_cfg=ng_cfg)
+                        run_chained_dependent_pipeline(df, config, max_iter, method, ng_cfg=ng_cfg,
+                                                        n_restarts=n_restarts)
                     # Persist the new driver column into the working dataset — same
                     # pattern Tab 2 uses for prophet columns — so every downstream
                     # tab (Results, Refine & Refit, exports) sees it automatically.
@@ -173,7 +186,7 @@ def render_tab5(nevergrad_available: bool):
                         config = new_config
                 else:
                     results_1, results_2 = run_multi_dependent_pipeline(
-                        df, config, max_iter, method, ng_cfg=ng_cfg)
+                        df, config, max_iter, method, ng_cfg=ng_cfg, n_restarts=n_restarts)
                 st.session_state.model_results   = results_1
                 st.session_state.model_fitted    = True
                 st.session_state.model_results_2 = results_2

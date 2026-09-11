@@ -448,7 +448,7 @@ def run_refit_pipeline(df_full, new_config, prev_result, max_iter, method,
         # the same wide-scale mix, so it's just as prone to `n` (and other
         # small-range params) getting stuck at their warm-started/init
         # value under a single unscaled finite-difference `eps`.
-        theta0_norm, norm_bounds, unscale = build_normalized_problem(theta0, bounds)
+        theta0_norm, norm_bounds, unscale, _scale = build_normalized_problem(theta0, bounds)
 
         def objective(theta_norm):
             theta = unscale(theta_norm)
