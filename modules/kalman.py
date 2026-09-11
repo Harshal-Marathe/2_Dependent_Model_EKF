@@ -61,9 +61,15 @@ for whether the intercept persists period-to-period at all:
   potentially delayed/S-shaped persistence, reaching back L =
   INTERCEPT_WEIBULL_N_LAGS periods, in place of AR(1)'s single-lag G0):
     I_t = G0 · Σ_{l=1}^{L} w_l · I_{t-l}  +  Σ_k γ_k · f(media_k,t)
+   HEAD
     (w_1..w_L are normalised Weibull CDF-interval-mass weights summing to
     1 — same weibull_lag_weights() function used for per-channel media
     adstock, fitted shape k / scale λ. G0 here plays the SAME overall-persistence
+
+    (w_1..w_L are normalised Weibull PDF weights summing to 1 — same
+    weibull_lag_weights() function used for per-channel media adstock,
+    fitted shape k / scale λ. G0 here plays the SAME overall-persistence
+ b955e2f2c0dbdc27cce7337feb6255f8811e94ad
     role/bound as AR(1)'s G0 — spread across L lags via the Weibull shape
     instead of concentrated at lag 1 — and keeps the AR(L) feedback
     stationary/mean-reverting rather than a unit root, since the Weibull
