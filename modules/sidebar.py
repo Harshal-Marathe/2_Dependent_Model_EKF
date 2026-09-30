@@ -11,6 +11,7 @@ def render_sidebar(nevergrad_available: bool):
     with st.sidebar:
         st.markdown("## 📡 2 dependent model")
         st.markdown("**Recursive Bayesian Estimation**  \nMarketing Mix Modeling")
+        st.caption("Core: MCMC (NUTS) · build 4 · band-column filter on")
         
         st.divider()
         steps = {
