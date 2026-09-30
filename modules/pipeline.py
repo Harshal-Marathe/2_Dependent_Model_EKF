@@ -15,13 +15,12 @@ Two entry points:
 
 import numpy as np
 import pandas as pd
+from scipy.optimize import minimize
 
 from modules.dependencies import NEVERGRAD_AVAILABLE
 from modules.params import _make_globals, unpack_theta
-from modules.bounds import _build_theta0_and_bounds, build_normalized_problem, theta_param_labels
-from modules.optimizer import (
-    run_nevergrad_optimizer, run_nevergrad_optimizer_joint, run_multistart_local_optimizer,
-)
+from modules.bounds import _build_theta0_and_bounds, build_normalized_problem
+from modules.optimizer import run_nevergrad_optimizer, run_nevergrad_optimizer_joint
 from modules.kalman import (
     run_kalman_filter, run_bivariate_kalman_filter, rts_smoother,
     _precompute_adstocked, _build_observation_matrix, build_static_cache,
@@ -142,30 +141,12 @@ def _postprocess_equation(df_full, g, params, x_smooth, adstocked_media,
 
     contrib_df = df_full[[TARGET_COL]].copy()
 
-    INTERCEPT_DYNAMICS_TYPE = g.get("INTERCEPT_DYNAMICS_TYPE", "carryover")
     G0 = float(params["G0"])
     I0 = float(params.get("I0", 0.0))
     prev_intercept = np.empty(len(df_full))
     prev_intercept[1:] = x_smooth[:-1, 0]
     prev_intercept[0]  = x_smooth[0, 0]
-    if INTERCEPT_DYNAMICS_TYPE == "weibull":
-        # Weibull multi-lag carryover: recompute the same Σ_l w_l·I_(t-l)
-        # sum directly on the SMOOTHED intercept series (x_smooth[:,0]) —
-        # reusing the identical weighted-lag-sum function used for media
-        # adstock, since post-smoothing this is just a known series, no
-        # need to reference the internal shadow-lag states. No G0 scalar
-        # here — the normalised weights are used directly, matching the
-        # actual state equation — see modules/kalman.py.
-        from modules.transforms import adstock_weibull_lagged
-        n_lags_i = int(g.get("INTERCEPT_WEIBULL_N_LAGS", 4))
-        intercept_carryover = adstock_weibull_lagged(
-            pd.Series(x_smooth[:, 0]),
-            float(params.get("intercept_weibull_shape", 1.5)),
-            float(params.get("intercept_weibull_scale", 1.0)),
-            n_lags_i,
-        )
-    else:
-        intercept_carryover = G0 * prev_intercept
+    intercept_carryover = G0 * prev_intercept
 
     # Short-term view: the intercept as it actually enters the observation
     # equation, Y_t = intercept_t + Σ beta_i,t * media_i,t + ...  (i.e. the
@@ -177,14 +158,13 @@ def _postprocess_equation(df_full, g, params, x_smooth, adstocked_media,
     # boost piece. Named "Intercept Carryover" (not "Intercept") so it
     # doesn't collide with the short-term "Intercept" row when Short-Term +
     # Long-Term are combined.
-    #   Carryover dynamics: I_t = G0 * I_(t-1)          + Σ_k gamma_k * f(media_k,t)
-    #   Simple dynamics:    I_t = I0                    + Σ_k gamma_k * f(media_k,t)
-    #   Weibull dynamics:   I_t = Σ_l w_l * I_(t-l)      + Σ_k gamma_k * f(media_k,t)
+    #   Carryover dynamics: I_t = G0 * I_(t-1) + Σ_k gamma_k * f(media_k,t)
+    #   Simple dynamics:    I_t = I0           + Σ_k gamma_k * f(media_k,t)
     # In "simple" mode G0 is 0 so intercept_carryover is already all-zero;
     # the constant I0 baseline is broken out into its own column instead so
     # the long-term pieces still sum to the full intercept level.
     contrib_df["LongTerm_Intercept Carryover"] = intercept_carryover
-    if INTERCEPT_DYNAMICS_TYPE == "simple":
+    if g.get("INTERCEPT_DYNAMICS_TYPE", "carryover") == "simple":
         contrib_df["LongTerm_Intercept Baseline (I0)"] = np.full(len(df_full), I0)
 
     for i, col in enumerate(MEDIA_COLS):
@@ -361,27 +341,8 @@ def _postprocess_equation(df_full, g, params, x_smooth, adstocked_media,
             {"Category":"Synergy","Variable":pair_label,"Parameter":"Cross Hill n","Value":params["cross_n"][k]},
             {"Category":"Synergy","Variable":pair_label,"Parameter":"Cross Hill S","Value":params["cross_S"][k]},
         ]
-    _idt = g.get("INTERCEPT_DYNAMICS_TYPE", "carryover")
-    if _idt == "simple":
+    if g.get("INTERCEPT_DYNAMICS_TYPE", "carryover") == "simple":
         param_rows.append({"Category":"Global","Variable":"Intercept","Parameter":"I0",     "Value":params.get("I0", 0.0)})
-    elif _idt == "weibull":
-        param_rows.append({"Category":"Global","Variable":"Intercept","Parameter":"Intercept Weibull shape k","Value":params.get("intercept_weibull_shape", 1.5)})
-        param_rows.append({"Category":"Global","Variable":"Intercept","Parameter":"Intercept Weibull scale λ","Value":params.get("intercept_weibull_scale", 1.0)})
-        param_rows.append({"Category":"Global","Variable":"Intercept","Parameter":"Intercept Weibull n_lags","Value":g.get("INTERCEPT_WEIBULL_N_LAGS", 4)})
-        # Individual normalised per-lag weights w_1..w_L (sum to 1) — the
-        # actual numbers the shape/scale above translate into for the
-        # I_t = Σ_l w_l·I_(t-l) sum. See modules/transforms.py::weibull_lag_weights.
-        from modules.transforms import weibull_lag_weights
-        _iw_L = int(g.get("INTERCEPT_WEIBULL_N_LAGS", 4))
-        _iw_w = weibull_lag_weights(
-            float(params.get("intercept_weibull_shape", 1.5)),
-            float(params.get("intercept_weibull_scale", 1.0)),
-            _iw_L,
-        )
-        for _l, _wl in enumerate(_iw_w, start=1):
-            param_rows.append({"Category":"Global","Variable":"Intercept",
-                                "Parameter": f"Intercept Weibull weight w_{_l} (lag {_l})",
-                                "Value": float(_wl)})
     else:
         param_rows.append({"Category":"Global","Variable":"Intercept","Parameter":"G0",     "Value":params["G0"]})
     param_rows.append({"Category":"Global","Variable":"Noise",    "Parameter":"sigma_y","Value":params["sigma_y"]})
@@ -408,7 +369,7 @@ def _postprocess_equation(df_full, g, params, x_smooth, adstocked_media,
 
 # ── Single-dependent-variable pipeline (univariate RBE) ──────────────────────
 
-def run_full_ekf_pipeline(df_full, config, max_iter, method, ng_cfg=None, n_restarts=1):
+def run_full_ekf_pipeline(df_full, config, max_iter, method, ng_cfg=None):
     g = _make_globals(config)
     n_train  = config["n_train"]
     df_train = df_full.iloc[:n_train].copy().reset_index(drop=True)
@@ -418,13 +379,6 @@ def run_full_ekf_pipeline(df_full, config, max_iter, method, ng_cfg=None, n_rest
     # being searched over — build it once per optimization run instead of
     # on every single candidate evaluation.
     static_cache_train = build_static_cache(df_train, g)
-
-    # Always build the normalized-space mapping, even on the Nevergrad
-    # path — it costs nothing and gives us a `scale` function to bring
-    # whichever theta comes back (from either optimizer) into the same
-    # normalized units theta0 lives in, for the "did this parameter
-    # actually move from its initial guess" diagnostic below.
-    theta0_norm, norm_bounds, unscale, scale = build_normalized_problem(theta0, bounds)
 
     if method == "Nevergrad" and NEVERGRAD_AVAILABLE and ng_cfg:
         best_theta, _ = run_nevergrad_optimizer(df_train, g, theta0, bounds, ng_cfg,
@@ -438,21 +392,17 @@ def run_full_ekf_pipeline(df_full, config, max_iter, method, ng_cfg=None, n_rest
         # leaves small-range parameters like `n` stuck exactly at their
         # init value — their true gradient signal is below the numerical
         # noise floor of the Kalman recursion at the default step size.
-        #
-        # On top of that, `n_restarts` > 1 hedges against a DIFFERENT
-        # failure mode: theta0 itself sitting in a flat/insensitive
-        # region for some dimension, where even a perfectly-scaled
-        # gradient step finds no signal to move. See
-        # modules/optimizer.py::run_multistart_local_optimizer.
+        theta0_norm, norm_bounds, unscale = build_normalized_problem(theta0, bounds)
+
         def objective(theta_norm):
             theta = unscale(theta_norm)
             p = unpack_theta(theta, g)
             _, _, _, _, _, _, _, _, loglik = run_kalman_filter(
                 df_train, p, g, static_cache=static_cache_train)
             return -loglik
-        opt, _all_opts, _best_idx = run_multistart_local_optimizer(
-            objective, theta0_norm, norm_bounds, method, max_iter,
-            n_restarts=n_restarts, progress_label=f"{method} optimization")
+        opt = minimize(objective, theta0_norm, method=method,
+                       bounds=norm_bounds,
+                       options={"maxiter": max_iter, "ftol": 1e-9, "eps": 1e-6})
         best_theta = unscale(opt.x); opt_success = opt.success; opt_nit = opt.nit
 
     params = unpack_theta(best_theta, g)
@@ -467,19 +417,12 @@ def run_full_ekf_pipeline(df_full, config, max_iter, method, ng_cfg=None, n_rest
         opt_success, opt_nit, loglik, n_train=n_train,
     )
     result["P_smooth"] = P_smooth
-    # ── Multi-start / stuck-at-init diagnostics (Tab 6 flags these) ──────
-    result["theta0"]        = theta0
-    result["theta_fitted"]  = best_theta
-    result["theta0_norm"]   = theta0_norm
-    result["theta_fitted_norm"] = scale(best_theta)
-    result["theta_labels"]  = theta_param_labels(g)
-    result["n_restarts"]    = int(n_restarts) if not (method == "Nevergrad" and NEVERGRAD_AVAILABLE and ng_cfg) else 1
     return result
 
 
 # ── Multi-dependent pipeline — now a genuine JOINT bivariate fit ────────────
 
-def run_multi_dependent_pipeline(df_full, config, max_iter, method, ng_cfg=None, n_restarts=1):
+def run_multi_dependent_pipeline(df_full, config, max_iter, method, ng_cfg=None):
     """
     Fits Dependent 1 (config["target"]) and, if a second dependent variable
     is configured (config["target2"], e.g. Top-of-Mind / Consideration),
@@ -525,8 +468,7 @@ def run_multi_dependent_pipeline(df_full, config, max_iter, method, ng_cfg=None,
     """
     target2 = config.get("target2")
     if not (config.get("enable_second_dependent") and target2):
-        results_1 = run_full_ekf_pipeline(df_full, config, max_iter, method, ng_cfg=ng_cfg,
-                                           n_restarts=n_restarts)
+        results_1 = run_full_ekf_pipeline(df_full, config, max_iter, method, ng_cfg=ng_cfg)
         return results_1, None
 
     # ── Build per-equation configs / globals ─────────────────────────
@@ -563,8 +505,6 @@ def run_multi_dependent_pipeline(df_full, config, max_iter, method, ng_cfg=None,
     # per-dependent split.
     config_2["intercept_dynamics_type"] = config.get(
         "intercept_dynamics_type_2", config.get("intercept_dynamics_type", "carryover"))
-    config_2["intercept_weibull_n_lags"] = config.get(
-        "intercept_weibull_n_lags_2", config.get("intercept_weibull_n_lags", 4))
     # different) channel lists rather than reusing Dep 1's, which may not
     # even contain the same columns.
     config_2["initial_media_betas"]         = {c: 0.0     for c in config_2["media"]}
@@ -679,12 +619,6 @@ def run_multi_dependent_pipeline(df_full, config, max_iter, method, ng_cfg=None,
     if loss_function_mode == "nll_only":
         lambda_reg = 0.0
 
-    # Same normalization mapping as the single-dependent path — computed
-    # unconditionally (cheap) so we have `scale_joint` on hand afterward
-    # for the stuck-at-init diagnostic, regardless of which optimizer ran.
-    theta0_joint_norm, norm_bounds_joint, unscale_joint, scale_joint = build_normalized_problem(
-        theta0_joint, bounds_joint)
-
     if method == "Nevergrad" and NEVERGRAD_AVAILABLE and ng_cfg:
         best_theta_joint, _ = run_nevergrad_optimizer_joint(
             df_train, g1, g2, theta0_joint, bounds_joint, n1, n2, ng_cfg,
@@ -695,12 +629,10 @@ def run_multi_dependent_pipeline(df_full, config, max_iter, method, ng_cfg=None,
         # Same normalization fix as the single-dependent path above (see
         # modules/bounds.py::build_normalized_problem) — theta_joint mixes
         # the same wide-scale parameters (twice over, once per dependent
-        # variable) plus rho/phi, so it needs it just as much. On top of
-        # that, `n_restarts` > 1 multi-starts this joint local search the
-        # same way as the single-dependent path (see
-        # modules/optimizer.py::run_multistart_local_optimizer) — a flat
-        # region around theta0_joint in delta/n/gamma is just as possible
-        # here as in the univariate case, for either equation.
+        # variable) plus rho/phi, so it needs it just as much.
+        theta0_joint_norm, norm_bounds_joint, unscale_joint = build_normalized_problem(
+            theta0_joint, bounds_joint)
+
         def objective(theta_joint_norm):
             theta_joint = unscale_joint(theta_joint_norm)
             theta1 = theta_joint[:n1]
@@ -717,9 +649,9 @@ def run_multi_dependent_pipeline(df_full, config, max_iter, method, ng_cfg=None,
                 df_train, p1, g1, p2, g2, rho, phi1, phi2, lambda_reg,
                 static_cache1=static_cache1_train, static_cache2=static_cache2_train)
             return loss
-        opt, _all_opts, _best_idx = run_multistart_local_optimizer(
-            objective, theta0_joint_norm, norm_bounds_joint, method, max_iter,
-            n_restarts=n_restarts, progress_label=f"{method} joint optimization")
+        opt = minimize(objective, theta0_joint_norm, method=method,
+                        bounds=norm_bounds_joint,
+                        options={"maxiter": max_iter, "ftol": 1e-9, "eps": 1e-6})
         best_theta_joint = unscale_joint(opt.x); opt_success = opt.success; opt_nit = opt.nit
 
     best_theta1 = best_theta_joint[:n1]
@@ -759,23 +691,6 @@ def run_multi_dependent_pipeline(df_full, config, max_iter, method, ng_cfg=None,
         opt_success, opt_nit, joint_loglik, n_train=n_train,
     )
 
-    # ── Multi-start / stuck-at-init diagnostics (Tab 6 flags these) ──────
-    # Per-equation, normalized in that equation's OWN theta0/bounds space
-    # (theta0_1/bounds1, theta0_2/bounds2) — simpler and just as valid as
-    # normalizing in the full joint space, since rho/phi aren't per-
-    # channel parameters a person would look at this flag for anyway.
-    _theta0_1_norm, _nb1, _unsc1, _sc1 = build_normalized_problem(theta0_1, bounds1)
-    _theta0_2_norm, _nb2, _unsc2, _sc2 = build_normalized_problem(theta0_2, bounds2)
-    results_1["theta0"] = theta0_1; results_1["theta_fitted"] = best_theta1
-    results_1["theta0_norm"] = _theta0_1_norm; results_1["theta_fitted_norm"] = _sc1(best_theta1)
-    results_1["theta_labels"] = theta_param_labels(g1)
-    results_2["theta0"] = theta0_2; results_2["theta_fitted"] = best_theta2
-    results_2["theta0_norm"] = _theta0_2_norm; results_2["theta_fitted_norm"] = _sc2(best_theta2)
-    results_2["theta_labels"] = theta_param_labels(g2)
-    _n_restarts_used = 1 if (method == "Nevergrad" and NEVERGRAD_AVAILABLE and ng_cfg) else int(n_restarts)
-    results_1["n_restarts"] = _n_restarts_used
-    results_2["n_restarts"] = _n_restarts_used
-
     # NRMSE regularization diagnostics, evaluated on the FULL dataset with
     # the fitted params (same pattern as joint_loglik above) — lets the
     # Results tab show what the regularizer actually saw, even though the
@@ -801,7 +716,7 @@ def run_multi_dependent_pipeline(df_full, config, max_iter, method, ng_cfg=None,
 
 # ── Chained / sequential pipeline — Dependent 2 feeds Dependent 1 as x_t ────
 
-def run_chained_dependent_pipeline(df_full, config, max_iter, method, ng_cfg=None, n_restarts=1):
+def run_chained_dependent_pipeline(df_full, config, max_iter, method, ng_cfg=None):
     """
     Chained (mediation-style) two-stage fit, as an alternative to the joint
     bivariate fit above.
@@ -845,8 +760,7 @@ def run_chained_dependent_pipeline(df_full, config, max_iter, method, ng_cfg=Non
     """
     target2 = config.get("target2")
     if not (config.get("enable_second_dependent") and target2):
-        results_1 = run_full_ekf_pipeline(df_full, config, max_iter, method, ng_cfg=ng_cfg,
-                                           n_restarts=n_restarts)
+        results_1 = run_full_ekf_pipeline(df_full, config, max_iter, method, ng_cfg=ng_cfg)
         return results_1, None, df_full, None
 
     # ── Stage 1: fit Dependent 2 completely on its own ───────────────────
@@ -870,8 +784,6 @@ def run_chained_dependent_pipeline(df_full, config, max_iter, method, ng_cfg=Non
     # identical note in run_multi_dependent_pipeline above.
     config_2["intercept_dynamics_type"] = config.get(
         "intercept_dynamics_type_2", config.get("intercept_dynamics_type", "carryover"))
-    config_2["intercept_weibull_n_lags"] = config.get(
-        "intercept_weibull_n_lags_2", config.get("intercept_weibull_n_lags", 4))
     config_2["initial_media_betas"]         = {c: 0.0     for c in config_2["media"]}
     config_2["initial_comp_betas"]          = {c: -0.0001 for c in config_2["comp_media"]}
     config_2["initial_own_nonmedia_betas"]  = {c: 0.0     for c in config_2["non_media"]}
@@ -884,8 +796,7 @@ def run_chained_dependent_pipeline(df_full, config, max_iter, method, ng_cfg=Non
     if pcb_2:
         config_2["per_channel_bounds"] = pcb_2
 
-    results_2 = run_full_ekf_pipeline(df_full, config_2, max_iter, method, ng_cfg=ng_cfg,
-                                       n_restarts=n_restarts)
+    results_2 = run_full_ekf_pipeline(df_full, config_2, max_iter, method, ng_cfg=ng_cfg)
 
     # ── Stage 2: inject Dependent 2's output as an x-driver, fit Dep 1 ───
     use_fitted  = config.get("chain_use_fitted", True)
@@ -929,8 +840,7 @@ def run_chained_dependent_pipeline(df_full, config, max_iter, method, ng_cfg=Non
     adstock_map.setdefault(driver_col, "instant")
     config_1["adstock_map"] = adstock_map
 
-    results_1 = run_full_ekf_pipeline(df_with_driver, config_1, max_iter, method, ng_cfg=ng_cfg,
-                                       n_restarts=n_restarts)
+    results_1 = run_full_ekf_pipeline(df_with_driver, config_1, max_iter, method, ng_cfg=ng_cfg)
     results_1["chained_from_dep2"] = True
     results_1["chain_driver_col"]  = driver_col
     results_1["chain_use_fitted"]  = use_fitted

@@ -77,27 +77,11 @@ def _make_globals(cfg: dict):
     #     I_t = G0 * I_(t-1) + Σ_k gamma_k * f(media_k,t)
     # "simple" (no persistence — pure regression on current-period effectors):
     #     I_t = I0 + Σ_k gamma_k * f(media_k,t)
-    # "weibull" (multi-lag Weibull-adstocked carryover — a distributed-lag,
-    # potentially delayed/S-shaped persistence, in place of the single-lag
-    # AR(1) that "carryover" uses):
-    #     I_t = Σ_{l=1}^{L} w_l * I_(t-l) + Σ_k gamma_k * f(media_k,t)
-    #     (w_1..w_L are normalised Weibull CDF-interval-mass weights over L = 
-    #     INTERCEPT_WEIBULL_N_LAGS past periods, from the SAME
-    #     weibull_lag_weights() used by the per-channel media adstock —
-    #     see modules/transforms.py. Fitted shape k / scale λ. No G0 term:
-    #     the normalised weights are used directly as the persistence sum.)
     # In "simple" mode G0 is fixed at 0 (no theta slot) and a fitted constant
-    # I0 takes its place. In "weibull" mode G0 is fixed at 1.0 (unused, no
-    # theta slot) and I0 is fixed at 0; two theta slots (shape, scale) take
-    # G0's place instead. For the
-    # 2-dependent joint model, "simple" also switches off the cross-intercept
-    # coupling (phi_1/phi_2) — see modules/pipeline.py::run_multi_dependent_pipeline.
-    g["INTERCEPT_DYNAMICS_TYPE"] = cfg.get("intercept_dynamics_type", "carryover")  # "carryover" | "simple" | "weibull"
-    # INTERCEPT_WEIBULL_N_LAGS: how many past periods (L) the intercept's own
-    # Weibull-weighted lag sum reaches back over. Only used when
-    # INTERCEPT_DYNAMICS_TYPE == "weibull" — a fixed hyperparameter (like
-    # ADSTOCK_N_LAGS for media), not fitted.
-    g["INTERCEPT_WEIBULL_N_LAGS"] = int(cfg.get("intercept_weibull_n_lags", 4))
+    # I0 takes its place. For the 2-dependent joint model, "simple" also
+    # switches off the cross-intercept coupling (phi_1/phi_2) — see
+    # modules/pipeline.py::run_multi_dependent_pipeline.
+    g["INTERCEPT_DYNAMICS_TYPE"] = cfg.get("intercept_dynamics_type", "carryover")  # "carryover" | "simple"
 
     # CROSS_INTERCEPT_COUPLING_MODE: only relevant for the 2-dependent JOINT
     # (bivariate) fit, and only when INTERCEPT_DYNAMICS_TYPE is "carryover"
@@ -196,30 +180,17 @@ def unpack_theta(theta, g: dict):
 
     # ── Beta-persistence (Ls) for own media ─────────────────────────
     Ls       = theta[idx:idx+N_MEDIA];     idx += N_MEDIA
-    # ── Intercept dynamics: G0 (carryover) XOR I0 (simple regression) XOR
-    # intercept_weibull_shape/scale (weibull multi-lag carryover) ──────
-    # Exactly one branch occupies theta slots here, mirroring the
+    # ── Intercept dynamics: G0 (carryover) XOR I0 (simple regression) ──
+    # Exactly one of the two occupies a theta slot here, mirroring the
     # USE_ORGANIC_DRIFT/mu variable-length pattern below. See
     # modules/params.py::_make_globals and modules/kalman.py module
-    # docstring for the three equations this switches between.
+    # docstring for the two equations this switches between.
     if INTERCEPT_DYNAMICS_TYPE == "simple":
         G0 = 0.0
         I0 = theta[idx];                   idx += 1
-        intercept_weibull_shape = 1.5
-        intercept_weibull_scale = 1.0
-    elif INTERCEPT_DYNAMICS_TYPE == "weibull":
-        G0 = 1.0  # no overall-persistence scalar in weibull mode — the
-                   # Weibull-weighted lag sum (w_1..w_L, summing to 1) is
-                   # used directly as I_t's persistence term, so G0 gets
-                   # no theta slot here at all (unlike "carryover" mode).
-        I0 = 0.0
-        intercept_weibull_shape = theta[idx]; idx += 1
-        intercept_weibull_scale = theta[idx]; idx += 1
     else:
         G0 = theta[idx];                   idx += 1
         I0 = 0.0
-        intercept_weibull_shape = 1.5
-        intercept_weibull_scale = 1.0
     delta    = theta[idx:idx+N_MEDIA];     idx += N_MEDIA
     gamma    = theta[idx:idx+N_EFFECTORS]; idx += N_EFFECTORS
 
@@ -282,9 +253,6 @@ def unpack_theta(theta, g: dict):
 
     return dict(
         Ls=Ls, G0=G0, I0=I0, delta=delta, gamma=gamma,
-        intercept_weibull_shape=intercept_weibull_shape,
-        intercept_weibull_scale=intercept_weibull_scale,
-        intercept_weibull_n_lags=g.get("INTERCEPT_WEIBULL_N_LAGS", 4),
         n_params=n_params, S_params=S_params,
         n_intercept=n_intercept, S_intercept=S_intercept,
         adstock_lambda=adstock_lambda,

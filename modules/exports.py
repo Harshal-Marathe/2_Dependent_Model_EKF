@@ -28,7 +28,7 @@ import pandas as pd
 from openpyxl.styles import Font, PatternFill, Alignment
 from openpyxl.utils import get_column_letter
 
-from modules.transforms import apply_transformation, adstock_weibull_lagged
+from modules.transforms import apply_transformation
 
 
 def _build_variable_index(g):
@@ -68,13 +68,6 @@ def build_intercept_decomposition_df(res, df_full):
         I_t = I0  +  Sum_k gamma_k * media_k,t^(n_k_intercept)              [Power]
         I_t = I0  +  Sum_k gamma_k * media_k,t^n / (media_k,t^n + S_k^n)    [Hill]
 
-    Weibull dynamics (multi-lag carryover) — same Power/Hill choice, but
-    the normalised Weibull-weighted lag sum Sum_l w_l * I_(t-l) replaces
-    G0 * I_(t-1) directly (no G0 scalar):
-        I_t = Sum_l w_l * I_(t-l)  +  Sum_k gamma_k * media_k,t^(n_k_intercept)  [Power]
-        I_t = Sum_l w_l * I_(t-l)  +  Sum_k gamma_k *
-                  media_k,t^n / (media_k,t^n + S_k^n)                            [Hill]
-
     Transform Type (Power/Hill) is set via config "intercept_transform_type"
     (g["INTERCEPT_TRANSFORM_TYPE"]); Dynamics Type (Carryover/Simple) via
     config "intercept_dynamics_type" (g["INTERCEPT_DYNAMICS_TYPE"]) — the
@@ -98,20 +91,7 @@ def build_intercept_decomposition_df(res, df_full):
     prev_intercept = np.empty(T)
     prev_intercept[1:] = x_smooth[:-1, 0]
     prev_intercept[0]  = x_smooth[0, 0]
-    if INTERCEPT_DYNAMICS_TYPE == "weibull":
-        # Same multi-lag Weibull weighted-lag sum as the media adstock,
-        # recomputed directly on the smoothed intercept series. No G0
-        # scalar — see the identical note in
-        # modules/pipeline.py::build_contribution_df.
-        n_lags_i = int(g.get("INTERCEPT_WEIBULL_N_LAGS", 4))
-        intercept_carryover = adstock_weibull_lagged(
-            pd.Series(x_smooth[:, 0]),
-            float(params.get("intercept_weibull_shape", 1.5)),
-            float(params.get("intercept_weibull_scale", 1.0)),
-            n_lags_i,
-        )
-    else:
-        intercept_carryover = G0 * prev_intercept
+    intercept_carryover = G0 * prev_intercept
     intercept_at_t = x_smooth[:, 0]
 
     data = {"Period": np.arange(T)}
@@ -205,7 +185,7 @@ _INTERCEPT_BLOCK_COLORS = {
     "Media_":                "3B82F6",  # blue   — same convention as Raw_ above
     "Transformed_":          "16A34A",  # green  — same convention as Model_Data
     "GammaXTransformed_":    "9333EA",  # purple — same convention as Contribution_
-    "Intercept_Carryover":   "F97316",  # orange — the persisted/carried-over piece
+    "Intercept_Carryover":   "F97316",  # orange — the G0 * I_(t-1) piece
     "Intercept_Baseline_I0": "EA580C",  # dark orange — the I0 constant (simple/no-carryover mode)
     "Intercept_at_t":        "DC2626",  # red    — the resulting full intercept level
 }
@@ -295,11 +275,9 @@ def build_master_workbook_bytes(res, config, df_full):
         "media betas' own Transform Type above.",
         "gamma_k * Transformed_* — that channel's boost contribution to the "
         "intercept's state equation for that period.",
-        "The persisted/carried-over piece of the intercept's state equation: "
-        "G0 * Intercept_(t-1) in Carryover (AR(1)) mode, or the normalised "
-        "Weibull-weighted lag sum Sum_l w_l * Intercept_(t-l) (no G0 scalar) "
-        "in Weibull mode. Always 0 when Intercept Dynamics is set to Simple "
-        "(no carryover) — see Intercept_Baseline_I0 below instead.",
+        "G0 * Intercept_(t-1) — the persisted/carried-over piece of the "
+        "intercept's state equation. Always 0 when Intercept Dynamics is set "
+        "to Simple (no carryover) — see Intercept_Baseline_I0 below instead.",
     ]
     if _legend_dynamics_type == "simple":
         _legend_blocks.append("Intercept_Baseline_I0")

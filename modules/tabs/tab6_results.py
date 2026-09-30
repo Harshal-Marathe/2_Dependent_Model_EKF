@@ -20,7 +20,7 @@ import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 
 from modules.ui_helpers import section, need_model, safe_multiselect
-from modules.transforms import hill_transform, power_transform, apply_transformation, weibull_lag_weights
+from modules.transforms import hill_transform, power_transform, apply_transformation
 from modules.exports import build_betas_df, build_master_workbook_bytes, build_full_results_zip_bytes
 
 
@@ -450,64 +450,6 @@ def _make_response_curve_fig(sel, idx, df, res, g, params, x_max_pct=150,
     return fig_rc, beta_med, beta_p25, beta_p75, n_v, S_v
 
 
-def _render_stuck_at_init_flag(res):
-    """
-    Diagnostic-only: flags parameters whose fitted value barely moved from
-    theta0 (the optimizer's starting guess), in NORMALIZED units — i.e.
-    less than 0.1% of that parameter's own natural range (see
-    modules/bounds.py::build_normalized_problem), not raw/absolute units,
-    so a huge-range parameter like S (half-saturation, ~O(1e6)) and a
-    tiny-range one like Hill's n (~O(1-15)) are compared on an equal,
-    proportionate footing.
-
-    This never fixes anything by itself — it's a fast, automatic replacement
-    for eyeballing a parameter-table CSV. A parameter landing here CAN be a
-    genuine optimum (nothing wrong with that), but it can also mean the
-    loglik surface was flat/unidentified around theta0 in that direction and
-    the optimizer had no gradient signal to leave it — increasing Tab 5's
-    "Restarts (multi-start)" and re-running tells the two apart.
-    """
-    theta0_norm       = res.get("theta0_norm")
-    theta_fitted_norm = res.get("theta_fitted_norm")
-    labels             = res.get("theta_labels")
-    if theta0_norm is None or theta_fitted_norm is None or labels is None:
-        return  # older / pre-diagnostic result (e.g. a saved session) — nothing to show
-
-    theta0_norm       = np.asarray(theta0_norm, dtype=float)
-    theta_fitted_norm = np.asarray(theta_fitted_norm, dtype=float)
-    move = np.abs(theta_fitted_norm - theta0_norm)
-
-    STUCK_THRESHOLD = 0.001  # < 0.1% of that parameter's own normalized range
-    stuck_idx = [i for i in np.where(move < STUCK_THRESHOLD)[0] if i < len(labels)]
-    if not stuck_idx:
-        return
-
-    n_restarts = res.get("n_restarts", 1)
-    stuck_labels = [labels[i] for i in stuck_idx]
-    st.warning(
-        f"⚠️ **{len(stuck_labels)} parameter(s) moved <0.1% from their initial "
-        f"guess** — may indicate a flat/unidentified region of the log-"
-        f"likelihood surface rather than a genuine optimum."
-    )
-    with st.expander(f"Which parameters ({len(stuck_labels)})"):
-        st.write(", ".join(stuck_labels))
-        if n_restarts <= 1:
-            st.caption(
-                "This fit used a single optimizer start (Restarts = 1). Raise "
-                "**Restarts (multi-start)** on Tab 5 and re-run — if a "
-                "randomized restart moves these parameters to a better "
-                "log-likelihood, theta0 was just an unlucky start; if every "
-                "restart lands back here, it's genuinely flat."
-            )
-        else:
-            st.caption(
-                f"This fit already used {n_restarts} multi-start restarts and "
-                "still landed here — a stronger sign these parameters are "
-                "genuinely in a flat/unidentified region, not just an unlucky "
-                "single start."
-            )
-
-
 def render_full_results(df, config, res, target, key_prefix="", pcb_key="per_channel_bounds"):
     """The full Results & ROI Analytics body (sections A-I). Called by
     Tab 7 for the officially-saved model, and by Tab 8 after every refit
@@ -529,8 +471,6 @@ def render_full_results(df, config, res, target, key_prefix="", pcb_key="per_cha
     c4.metric("Observations", len(df))
     with st.expander("📊 R² metrics"):
         st.metric("R²", f"{res['r2']:.4f}")
-
-    _render_stuck_at_init_flag(res)
 
     n_test = res.get("n_test", 0)
     if n_test and n_test > 0:
@@ -801,22 +741,6 @@ def render_full_results(df, config, res, target, key_prefix="", pcb_key="per_cha
     st.download_button("📥 Download Parameters",
                        param_df.to_csv(index=False).encode(), "parameters.csv", "text/csv",
                        key=f"{kp}dl_params")
-
-    if g.get("INTERCEPT_DYNAMICS_TYPE", "carryover") == "weibull":
-        _iw_params = res["params"]
-        _iw_L = int(g.get("INTERCEPT_WEIBULL_N_LAGS", 4))
-        _iw_k = float(_iw_params.get("intercept_weibull_shape", 1.5))
-        _iw_lam = float(_iw_params.get("intercept_weibull_scale", 1.0))
-        _iw_w = weibull_lag_weights(_iw_k, _iw_lam, _iw_L)
-        _iw_df = pd.DataFrame({
-            "Lag": [f"t-{l}" for l in range(1, _iw_L + 1)],
-            "Weight": _iw_w,
-        })
-        fig_iw = px.bar(_iw_df, x="Lag", y="Weight",
-                         title=f"Intercept Weibull carryover weights (k={_iw_k:.3f}, λ={_iw_lam:.3f}) — "
-                               f"sum = {_iw_w.sum():.4f}")
-        fig_iw.update_layout(height=300, template="plotly_white")
-        st.plotly_chart(fig_iw, use_container_width=True, key=f"{kp}fig_iw_weights")
 
     st.markdown("### G · ROI Analytics")
     roi_df = res["roi_df"]
