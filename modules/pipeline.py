@@ -460,6 +460,8 @@ def _add_posterior_bands(result, df_full, g, post_e):
         lo, hi = np.percentile(draws, [2.5, 97.5], axis=0)
         bands[f"ShortTerm_{col}_lo"] = lo
         bands[f"ShortTerm_{col}_hi"] = hi
+        contrib_df[f"ShortTerm_{col}_lo"] = lo
+        contrib_df[f"ShortTerm_{col}_hi"] = hi
         if col in media_set:
             tot = draws.sum(axis=1)
             if col in eff_cols:                                         # + LongTerm_{col}
