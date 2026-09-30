@@ -539,7 +539,7 @@ def render_full_results(df, config, res, target, key_prefix="", pcb_key="per_cha
 
     st.markdown("### E · Channel Contributions")
     from modules.uncertainty import strip_band_columns
-    contrib_df, _ = strip_band_columns(res["contrib_df"])
+    contrib_df, _ = strip_band_columns(res["contrib_df"], g=res.get("g"))
     short_cols = [c for c in contrib_df.columns if c.startswith("ShortTerm_")]
     long_cols  = [c for c in contrib_df.columns if c.startswith("LongTerm_")]
     totals_st  = contrib_df[short_cols].sum()

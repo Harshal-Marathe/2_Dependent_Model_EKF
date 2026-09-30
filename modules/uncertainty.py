@@ -27,45 +27,62 @@ Z95 = 1.959963984540054  # two-sided 95% normal critical value
 # 1. Smoother-covariance confidence bands
 # ─────────────────────────────────────────────────────────────────────────
 
-def strip_band_columns(contrib_df, min_frac=0.85):
+def strip_band_columns(contrib_df, g=None, min_frac=0.85):
     """
     Drop stray credible-band columns (ShortTerm_<ch>_lo / _hi) from a
-    contribution table, and return (clean_df, bands_df).
+    contribution table, and return (clean_df, bands_df), so every variable
+    shows up ONCE (its point estimate) instead of three times
+    (original + lo + hi).
 
-    An earlier build stored the 95% bands inside contrib_df, where the
-    Results tab counted them as extra channels. Results fitted with that
-    build (still sitting in an open session or a saved workspace) are
-    cleaned here.
+    Older builds stored the 95% bands inside contrib_df, where the Results
+    tab counted them as extra channels. Results fitted with that build
+    (still sitting in an open session or a saved workspace) are cleaned
+    here.
 
-    A (_lo, _hi) pair is treated as a band when ALL of these hold:
-      * its base column ShortTerm_<ch> exists;
-      * _lo is immediately followed by _hi in column order (the old code
-        appended them as adjacent pairs);
-      * lo <= base <= hi in at least `min_frac` of periods, and the totals
-        are ordered sum(lo) <= sum(base) <= sum(hi). Not 100% of periods:
-        the posterior MEAN can sit just outside a 95% percentile band where
-        a sign-constrained beta is pinned at its floor.
-    A genuine variable that merely happens to be named "..._hi"/"..._lo"
-    fails the adjacency and ordering tests and is kept.
+    Detection, most reliable first:
+      1. If the fitted model's variable map `g` is given: a ShortTerm_<name>
+         column is a REAL channel only if <name> is the intercept or one of
+         the model's own variables. Any ShortTerm_<name>_lo / _hi whose
+         stripped name is NOT a model variable, and whose base
+         ShortTerm_<name-without-suffix> exists, is a band. Exact - no
+         numeric guessing.
+      2. Without `g`: a (_lo, _hi) pair is a band when its base column
+         exists, lo <= hi in at least `min_frac` of periods and
+         lo <= base <= hi in at least `min_frac` of periods. (No adjacency
+         or total-ordering test: the posterior MEAN can sit outside a
+         percentile band on totals for skewed posteriors, which used to let
+         the bands leak through as extra rows.)
     """
     cols = list(contrib_df.columns)
-    pos = {c: i for i, c in enumerate(cols)}
+    colset = set(cols)
+
+    model_vars = None
+    if g:
+        model_vars = {"Intercept"}
+        for key in ("MEDIA_COLS", "COMP_MEDIA_COLS", "OWN_NONMEDIA_COLS",
+                    "COMP_NONMEDIA_COLS", "PRICE_COLS"):
+            model_vars.update(g.get(key, []) or [])
+
     drop = []
     for c in cols:
         if not (c.startswith("ShortTerm_") and c.endswith("_lo")):
             continue
         base, hi = c[:-3], c[:-3] + "_hi"
-        if base not in pos or hi not in pos or pos[hi] != pos[c] + 1:
+        if base not in colset or hi not in colset:
+            continue
+        if model_vars is not None:
+            # exact test: is "<x>_lo" itself a real model variable?
+            if c[len("ShortTerm_"):] in model_vars:
+                continue
+            drop += [c, hi]
             continue
         b = contrib_df[base].values.astype(float)
         lo_v = contrib_df[c].values.astype(float)
         hi_v = contrib_df[hi].values.astype(float)
         slack = 1e-6 * (1.0 + np.abs(b))
-        ok_lo = np.mean(lo_v <= b + slack)
-        ok_hi = np.mean(hi_v >= b - slack)
-        if (ok_lo >= min_frac and ok_hi >= min_frac
-                and lo_v.sum() <= b.sum() + 1e-6 * (1 + abs(b.sum()))
-                and hi_v.sum() >= b.sum() - 1e-6 * (1 + abs(b.sum()))):
+        if (np.mean(lo_v <= hi_v + slack) >= min_frac
+                and np.mean(lo_v <= b + slack) >= min_frac
+                and np.mean(hi_v >= b - slack) >= min_frac):
             drop += [c, hi]
     if not drop:
         return contrib_df, pd.DataFrame(index=contrib_df.index)

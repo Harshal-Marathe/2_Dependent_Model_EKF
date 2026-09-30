@@ -341,7 +341,7 @@ def build_full_results_zip_bytes(res, config, df_full, response_curve_images=Non
     param_df = res["param_df"]
     roi_df   = res["roi_df"]
     from modules.uncertainty import strip_band_columns
-    contrib_df, _ = strip_band_columns(res["contrib_df"])
+    contrib_df, _ = strip_band_columns(res["contrib_df"], g=res.get("g"))
     synergy_df = res.get("synergy_df")
     has_synergy = synergy_df is not None and not synergy_df.empty
 
