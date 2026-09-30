@@ -27,6 +27,34 @@ Z95 = 1.959963984540054  # two-sided 95% normal critical value
 # 1. Smoother-covariance confidence bands
 # ─────────────────────────────────────────────────────────────────────────
 
+def strip_band_columns(contrib_df, tol=1e-6):
+    """
+    Drop stray credible-band columns (ShortTerm_<ch>_lo / _hi) from a
+    contribution table, and return (clean_df, bands_df).
+
+    An earlier build stored the 95% bands inside contrib_df, where the
+    Results tab counted them as extra channels. Results fitted with that
+    build (still sitting in an open session or a saved workspace) are
+    cleaned here. A pair is only treated as a band when its base column
+    exists AND lo <= base <= hi holds in every period — so a genuine
+    variable that merely happens to be named "..._hi" / "..._lo" is kept.
+    """
+    cols = set(contrib_df.columns)
+    drop = []
+    for c in contrib_df.columns:
+        if not (c.startswith("ShortTerm_") and c.endswith("_lo")):
+            continue
+        base, hi = c[:-3], c[:-3] + "_hi"
+        if base in cols and hi in cols:
+            b = contrib_df[base].values; lo_v = contrib_df[c].values; hi_v = contrib_df[hi].values
+            slack = tol * (1.0 + np.abs(b))
+            if np.all(lo_v <= b + slack) and np.all(hi_v >= b - slack):
+                drop += [c, hi]
+    if not drop:
+        return contrib_df, pd.DataFrame(index=contrib_df.index)
+    return contrib_df.drop(columns=drop), contrib_df[drop]
+
+
 def _linear_state_index_map(g):
     """
     Ordered (state_index, column, kind) for every state dimension that has

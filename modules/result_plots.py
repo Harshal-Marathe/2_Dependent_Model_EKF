@@ -109,7 +109,8 @@ def render_fit_and_contrib(df, config, res, target, key_prefix=""):
     st.plotly_chart(fig, use_container_width=True, key=f"{key_prefix}avp")
 
     st.markdown("##### Channel Contributions")
-    contrib_df = res["contrib_df"]
+    from modules.uncertainty import strip_band_columns
+    contrib_df, _ = strip_band_columns(res["contrib_df"])
     short_cols = [c for c in contrib_df.columns if c.startswith("ShortTerm_")]
     long_cols  = [c for c in contrib_df.columns if c.startswith("LongTerm_")]
     totals_st  = contrib_df[short_cols].sum()

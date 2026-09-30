@@ -538,7 +538,8 @@ def render_full_results(df, config, res, target, key_prefix="", pcb_key="per_cha
         st.plotly_chart(fig_qq, use_container_width=True, key=f"{kp}fig_qq")
 
     st.markdown("### E · Channel Contributions")
-    contrib_df = res["contrib_df"]
+    from modules.uncertainty import strip_band_columns
+    contrib_df, _ = strip_band_columns(res["contrib_df"])
     short_cols = [c for c in contrib_df.columns if c.startswith("ShortTerm_")]
     long_cols  = [c for c in contrib_df.columns if c.startswith("LongTerm_")]
     totals_st  = contrib_df[short_cols].sum()
