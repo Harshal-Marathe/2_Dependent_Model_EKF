@@ -70,15 +70,17 @@ def _bounds_widget_for(col, role, refit_config, df, key_prefix, adstock_choice="
 
 
 def _run_and_record(df, new_config, action_label, var_label, unfreeze_cols,
-                     freeze_existing, refit_sigma, refit_G0, method, max_iter,
+                     freeze_existing, refit_sigma, refit_G0, mcmc_cfg,
                      manual_overrides=None):
-    with st.spinner("Refitting… warm-started from the current baseline (30–300 s)"):
+    prog = st.progress(0.0, text="Starting …")
+    with st.spinner("Re-sampling… chains start at the current fit (minutes)"):
         try:
             result = run_refit_pipeline(
-                df, new_config, st.session_state.refit_result, max_iter, method,
+                df, new_config, st.session_state.refit_result, mcmc_cfg,
                 unfreeze_cols=unfreeze_cols, freeze_existing=freeze_existing,
                 refit_sigma=refit_sigma, refit_G0=refit_G0,
                 manual_overrides=manual_overrides,
+                progress_cb=lambda f, t: prog.progress(float(min(max(f, 0.0), 1.0)), text=t),
             )
         except Exception as e:
             st.exception(e)
@@ -149,7 +151,7 @@ def render_tab7():
     c1.metric("MAPE", f"{refit_result['mape']:.2%}")
     c2.metric("R²", f"{refit_result['r2']:.4f}")
     c3.metric("Gelman R²", f"{refit_result['r2_gelman']:.4f}")
-    c4.metric("Log-Lik", f"{refit_result['loglik']:.2f}")
+    c4.metric("Post. mean log-lik", f"{refit_result['loglik']:.2f}")
     c5.metric("Refit steps taken", len(st.session_state.refit_history) - 1)
 
     with st.expander("📜 Refinement history", expanded=False):
@@ -179,16 +181,18 @@ def render_tab7():
     with st.expander("⚙️ Refit options", expanded=False):
         oc1, oc2 = st.columns(2)
         with oc1:
-            OPTIMIZER_OPTIONS = ["L-BFGS-B", "SLSQP"]
-            method = st.selectbox("Optimizer", OPTIMIZER_OPTIONS, key="refit_method")
-            max_iter = st.number_input("Max iterations", 100, 5000, 500, 100, key="refit_max_iter")
+            rf_warm = st.number_input("Warm-up iterations / chain", 100, 5000, 300, 100, key="refit_warmup")
+            rf_draws = st.number_input("Kept draws / chain", 100, 5000, 300, 100, key="refit_draws")
+            rf_chains = st.number_input("Chains", 1, 4, 2, 1, key="refit_chains")
+            mcmc_cfg = {"num_warmup": int(rf_warm), "num_samples": int(rf_draws),
+                        "num_chains": int(rf_chains)}
         with oc2:
             refit_sigma = st.checkbox(
-                "Re-optimize noise (sigma_y)", value=True, key="refit_sigma",
+                "Re-sample noise (sigma_y)", value=True, key="refit_sigma",
                 help="Recommended — residual variance usually shifts slightly "
                      "once a new variable explains part of it.")
             refit_G0 = st.checkbox(
-                "Also re-optimize global intercept persistence/baseline (G0 or I0)",
+                "Also re-sample global intercept persistence/baseline (G0 or I0)",
                 value=False, key="refit_G0",
                 help="Covers whichever of the two applies to this model's "
                      "Intercept Dynamics setting — G0 (Carryover mode) or "
@@ -245,7 +249,7 @@ def render_tab7():
                 df, new_config, "Added variable", new_col,
                 unfreeze_cols=set(), freeze_existing=freeze_existing,
                 refit_sigma=refit_sigma, refit_G0=refit_G0,
-                method=method, max_iter=int(max_iter),
+                mcmc_cfg=mcmc_cfg,
             )
 
     st.divider()
@@ -308,7 +312,7 @@ def render_tab7():
                     f"{adj_col} → " + ", ".join(f"{k}={v:.4g}" for k, v in overrides.items()),
                     unfreeze_cols=set(), freeze_existing=freeze_existing,
                     refit_sigma=refit_sigma, refit_G0=refit_G0,
-                    method=method, max_iter=int(max_iter),
+                    mcmc_cfg=mcmc_cfg,
                     manual_overrides={adj_col: overrides},
                 )
 
