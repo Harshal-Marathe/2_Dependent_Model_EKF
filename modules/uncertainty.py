@@ -29,34 +29,21 @@ Z95 = 1.959963984540054  # two-sided 95% normal critical value
 
 def strip_band_columns(contrib_df, g=None, min_frac=0.85):
     """
-    Drop stray credible-band columns (ShortTerm_<ch>_lo / _hi) from a
-    contribution table, and return (clean_df, bands_df), so every variable
-    shows up ONCE (its point estimate) instead of three times
-    (original + lo + hi).
+    Drop credible-band columns (ShortTerm_<ch>_lo / ShortTerm_<ch>_hi) from a
+    contribution table and return (clean_df, bands_df), so every variable
+    appears ONCE (point estimate) instead of three times (original+lo+hi).
 
-    Older builds stored the 95% bands inside contrib_df, where the Results
-    tab counted them as extra channels. Results fitted with that build
-    (still sitting in an open session or a saved workspace) are cleaned
-    here.
-
-    Detection, most reliable first:
-      1. If the fitted model's variable map `g` is given: a ShortTerm_<name>
-         column is a REAL channel only if <name> is the intercept or one of
-         the model's own variables. Any ShortTerm_<name>_lo / _hi whose
-         stripped name is NOT a model variable, and whose base
-         ShortTerm_<name-without-suffix> exists, is a band. Exact - no
-         numeric guessing.
-      2. Without `g`: a (_lo, _hi) pair is a band when its base column
-         exists, lo <= hi in at least `min_frac` of periods and
-         lo <= base <= hi in at least `min_frac` of periods. (No adjacency
-         or total-ordering test: the posterior MEAN can sit outside a
-         percentile band on totals for skewed posteriors, which used to let
-         the bands leak through as extra rows.)
+    Name-based and deliberately simple: a ShortTerm_X_lo / ShortTerm_X_hi
+    column is a band whenever its base ShortTerm_X column exists. Each
+    column is judged on its own (no pairing / adjacency / numeric-ordering
+    requirement - those made stale results leak through). The only
+    exception: when the fitted model's variable map `g` is supplied and
+    "X_lo" / "X_hi" is itself a real model variable, it is kept.
     """
     cols = list(contrib_df.columns)
     colset = set(cols)
 
-    model_vars = None
+    model_vars = set()
     if g:
         model_vars = {"Intercept"}
         for key in ("MEDIA_COLS", "COMP_MEDIA_COLS", "OWN_NONMEDIA_COLS",
@@ -65,25 +52,12 @@ def strip_band_columns(contrib_df, g=None, min_frac=0.85):
 
     drop = []
     for c in cols:
-        if not (c.startswith("ShortTerm_") and c.endswith("_lo")):
+        if not c.startswith("ShortTerm_") or not (c.endswith("_lo") or c.endswith("_hi")):
             continue
-        base, hi = c[:-3], c[:-3] + "_hi"
-        if base not in colset or hi not in colset:
-            continue
-        if model_vars is not None:
-            # exact test: is "<x>_lo" itself a real model variable?
-            if c[len("ShortTerm_"):] in model_vars:
-                continue
-            drop += [c, hi]
-            continue
-        b = contrib_df[base].values.astype(float)
-        lo_v = contrib_df[c].values.astype(float)
-        hi_v = contrib_df[hi].values.astype(float)
-        slack = 1e-6 * (1.0 + np.abs(b))
-        if (np.mean(lo_v <= hi_v + slack) >= min_frac
-                and np.mean(lo_v <= b + slack) >= min_frac
-                and np.mean(hi_v >= b - slack) >= min_frac):
-            drop += [c, hi]
+        if c[len("ShortTerm_"):] in model_vars:
+            continue                      # genuine model variable
+        if c[:-3] in colset:              # base ShortTerm_X exists -> it's a band
+            drop.append(c)
     if not drop:
         return contrib_df, pd.DataFrame(index=contrib_df.index)
     return contrib_df.drop(columns=drop), contrib_df[drop]

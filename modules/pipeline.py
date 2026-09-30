@@ -452,6 +452,25 @@ def _add_posterior_bands(result, df_full, g, post_e):
     media_set = set(g["MEDIA_COLS"])
     tot_lo, tot_hi, roi_lo, roi_hi, roi_med, p_pos = {}, {}, {}, {}, {}, {}
 
+    # Coefficient (time-averaged beta) 95% credible interval per variable.
+    # Each posterior draw is a whole beta_t path, so its time-average is one
+    # draw of "the coefficient"; the 2.5 / 97.5 percentiles across draws give
+    # the interval. Read by the Results tab's Coefficient table.
+    coef_rows = {}
+
+    def _coef_ci(name, si):
+        avg = X_keep[:, :, si].mean(axis=1)
+        lo_c, hi_c = np.percentile(avg, [2.5, 97.5])
+        coef_rows[name] = dict(
+            Coef_lo=float(lo_c), Coef_hi=float(hi_c),
+            Coef_sd=float(avg.std(ddof=1)) if len(avg) > 1 else float("nan"),
+            Prob_gt_0=float(np.mean(avg > 0)))
+
+    _coef_ci("Intercept", 0)
+    for _si, _col, _k in _linear_state_index_map(g):
+        _coef_ci(_col, _si)
+    result["coef_ci_df"] = pd.DataFrame.from_dict(coef_rows, orient="index")
+
     for state_i, col, _kind in _linear_state_index_map(g):
         if col not in df_full.columns or f"ShortTerm_{col}" not in contrib_df.columns:
             continue

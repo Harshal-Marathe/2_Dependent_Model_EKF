@@ -22,6 +22,8 @@ from plotly.subplots import make_subplots
 from modules.ui_helpers import section, need_model, safe_multiselect
 from modules.transforms import hill_transform, power_transform, apply_transformation
 from modules.exports import build_betas_df, build_master_workbook_bytes, build_full_results_zip_bytes
+from modules.contrib_tables import (coefficient_table, coefficient_contrib_frame,
+                                    shortterm_table, shortterm_table_html)
 
 
 def _render_tab7_promote_section():
@@ -548,42 +550,52 @@ def render_full_results(df, config, res, target, key_prefix="", pcb_key="per_cha
     rescale_factor, excluded_media, promo_cols = _render_spend_settings(kp, g, df)
     price_factor, roi_adj = _render_roi_value_conversion_panel(kp, g)
 
-    t1, t2 = st.columns(2)
-    with t1:
-        st.markdown("#### Short-Term Contribution Summary")
-        df_st, pos_st, neg_st = _contribution_table(totals_st, "ShortTerm_")
-        df_st_ei, rescaled_spend, total_own_spend = _add_efficiency_index(
-            df_st, g, df, rescale_factor, excluded_media, promo_cols,
-            price_factor=price_factor, roi_adj=roi_adj)
-        st.dataframe(
-            df_st_ei.style.format({
-                "Total Contrib":   "{:,.2f}",
-                "Share (%)":       "{:.1f}",
-                "Spend Share (%)": "{:.2f}",
-                "EI":              "{:.3f}",
-                "ROI":             "{:.4f}",
-            }, na_rep="—"),
-            use_container_width=True, hide_index=True, key=f"{kp}df_st",
-        )
-        st.caption(
-            "**EI (Efficiency Index)** = Contribution Share (%) ÷ Spend Share (%), "
-            "computed only for **own** variables (own media + any flagged "
-            "promotional spend) — EI > 1 means a variable is punching above its "
-            "spend weight, EI < 1 means below. Competitor/price/intercept rows "
-            "show **—** since they have no spend to divide by. "
-            f"Own-spend pool used: **{total_own_spend:,.2f}** "
-            f"(rescale ×{rescale_factor:,.0f}). "
-            f"**ROI** = (Total Contrib × Value Conversion Factor) ÷ Spend — see "
-            "**🎛️ ROI Value Conversion** panel above "
-            f"(current price factor from Tab 2: ×{price_factor:,.4f})."
-        )
-        check_st = pos_st + neg_st
-        c1s, c2s, c3s = st.columns(3)
-        c1s.metric("Positive pool", f"{pos_st:,.2f}")
-        c2s.metric("Negative pool", f"{neg_st:,.2f}")
-        c3s.metric("Net", f"{check_st:,.2f}")
-        st.caption("✅ Positive shares sum to **+100 %** · Negative shares sum to **−100 %**")
-    with t2:
+    # ── Coefficients (95% credible interval) ────────────────────────────
+    st.markdown("#### Coefficients (95% credible interval)")
+    coef_tbl = coefficient_table(res, g)
+    st.dataframe(
+        coef_tbl.style.format({
+            "Coefficient": "{:.6g}", "95% CI Low": "{:.6g}",
+            "95% CI High": "{:.6g}", "P(Coef > 0)": "{:.1%}",
+        }, na_rep="—"),
+        use_container_width=True, hide_index=True, key=f"{kp}df_coef",
+    )
+    st.caption(
+        "**Coefficient** = time-average of the smoothed β\u209c (posterior mean). "
+        "**95% CI** = 2.5 / 97.5 percentiles across MCMC draws of each draw's "
+        "time-averaged β. The Short-Term table below uses **only the Coefficient** "
+        "(never the CI bounds)."
+    )
+    if coef_tbl["95% CI Low"].isna().all():
+        st.info("95% CIs aren't stored on this result (fitted with an older build). "
+                "Re-run the model to populate them.")
+
+    # ── Short-Term Contribution Summary (coefficient x Sum of Input) ────
+    st.markdown("#### Short-Term Contribution Summary")
+    st_tbl = shortterm_table(
+        res, g, df, rescale_factor, excluded_media, promo_cols,
+        value_adj=lambda v: (_roi_value_adj_factor(v, price_factor, roi_adj)
+                             if v in g.get("MEDIA_COLS", []) else float(price_factor)))
+    st.markdown(shortterm_table_html(st_tbl), unsafe_allow_html=True)
+    st.caption(
+        "**Contribution** = Coefficient × Sum of Input (Intercept input = 1 per period). "
+        "**Contri % (Pos=100)**: positive contributions scaled to sum to 100 "
+        "(negatives show 0). **Contri % (Pos/Neg=100)**: |Contribution| ÷ Σ|Contribution|. "
+        "**ROAS** = Contribution × value factor ÷ (Raw Spend × rescale) and **EI** = "
+        "ROAS ÷ pooled ROAS, both only for own spend variables "
+        f"(rescale ×{rescale_factor:,.0f}; value factor from the 🎛️ ROI Value Conversion panel)."
+    )
+    st.download_button("📥 Download Short-Term Table", st_tbl.to_csv(index=False).encode(),
+                       "short_term_contribution.csv", "text/csv", key=f"{kp}dl_st_tbl")
+    pos_st = float(st_tbl.loc[st_tbl["Contribution"] > 0, "Contribution"].sum())
+    neg_st = float(st_tbl.loc[st_tbl["Contribution"] < 0, "Contribution"].sum())
+    c1s, c2s, c3s = st.columns(3)
+    c1s.metric("Positive pool", f"{pos_st:,.2f}")
+    c2s.metric("Negative pool", f"{neg_st:,.2f}")
+    c3s.metric("Net", f"{pos_st + neg_st:,.2f}")
+    st_coef_df = coefficient_contrib_frame(res, g, df)
+
+    if True:
         st.markdown("#### Long-Term Contribution Summary")
         df_lt, pos_lt, neg_lt = _contribution_table(totals_lt, "LongTerm_")
         st.dataframe(df_lt, use_container_width=True, hide_index=True, key=f"{kp}df_lt")
@@ -639,8 +651,9 @@ def render_full_results(df, config, res, target, key_prefix="", pcb_key="per_cha
         )
         pc1, pc2 = st.columns(2)
         with pc1:
-            st_names  = [c.replace("ShortTerm_", "") for c in short_cols]
-            st_vals   = totals_st.values
+            _st_tot   = st_coef_df.sum()
+            st_names  = [c.replace("ShortTerm_", "") for c in _st_tot.index]
+            st_vals   = _st_tot.values
             pos_mask  = st_vals > 0
             if pos_mask.any():
                 fig_pie_st = px.pie(
@@ -667,10 +680,10 @@ def render_full_results(df, config, res, target, key_prefix="", pcb_key="per_cha
             else:
                 st.info("No positive long-term contributions.")
 
-    _cplot = contrib_df.copy().reset_index(drop=True)
+    _cplot = st_coef_df.copy().reset_index(drop=True)
     _cplot["_period"] = np.arange(len(_cplot))
     fig_st_area = px.area(
-        _cplot, x="_period", y=short_cols,
+        _cplot, x="_period", y=list(st_coef_df.columns),
         title="Short-term Contributions Over Time",
         color_discrete_sequence=px.colors.qualitative.Bold,
     )
