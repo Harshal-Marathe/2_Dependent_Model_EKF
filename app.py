@@ -33,7 +33,7 @@ st.set_page_config(page_title="2 Dependent Model", page_icon="📡",
 
 apply_styles()
 init_session_state()
-render_sidebar(NEVERGRAD_AVAILABLE)
+render_sidebar(False)
 
 
 # ════════════════════════════════════════════════════════════════════
@@ -61,7 +61,7 @@ with tab4:
     render_tab4()
 
 with tab5:
-    render_tab5(NEVERGRAD_AVAILABLE)
+    render_tab5()
 
 with tab6:
     render_tab6()

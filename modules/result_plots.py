@@ -3,7 +3,7 @@ Shared result-rendering helpers.
 
 `render_fit_and_contrib()` draws an Actual-vs-Predicted chart plus a
 Short-term / Long-term / Both contribution summary for any fitted result
-dict (whatever produced it — Tab 6's run_full_ekf_pipeline or Tab 8's
+dict (whatever produced it — Tab 6's run_full_pipeline or Tab 8's
 run_refit_pipeline — the shapes are identical). Used by Tab 8 so every
 refit immediately shows its own fit + contribution results, and could be
 reused anywhere else a "before/after" comparison is needed.
@@ -63,7 +63,7 @@ def render_fit_and_contrib(df, config, res, target, key_prefix=""):
     c1.metric("MAPE", f"{res['mape']:.2%}")
     c2.metric("R²", f"{res['r2']:.4f}")
     c3.metric("Gelman R²", f"{res['r2_gelman']:.4f}")
-    c4.metric("Log-Lik", f"{res['loglik']:.2f}")
+    c4.metric("Post. mean log-lik", f"{res['loglik']:.2f}")
 
     st.markdown("##### In-Sample vs. Out-of-Sample Accuracy")
     n_test = res.get("n_test", 0)

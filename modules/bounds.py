@@ -32,7 +32,7 @@ def _build_theta0_and_bounds(df, g):
     # ── Intercept dynamics: "carryover" (G0) vs "simple" (I0) ──────────
     # Independent of INTERCEPT_TRANSFORM_TYPE (Power/Hill on the effector
     # boost) — this switches whether the intercept state persists at all.
-    # See modules/params.py::_make_globals and modules/kalman.py module
+    # See modules/params.py::_make_globals and modules/statespace.py module
     # docstring. Exactly one of G0/I0 gets a theta slot (mirrors the
     # USE_ORGANIC_DRIFT/mu variable-length pattern used elsewhere here).
     INTERCEPT_DYNAMICS_TYPE = g.get("INTERCEPT_DYNAMICS_TYPE", "carryover")
