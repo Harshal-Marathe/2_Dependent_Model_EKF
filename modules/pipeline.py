@@ -1,31 +1,37 @@
 """
-Full RBE MMM pipeline: optimize on the train split, run the filter +
-smoother on the full dataset, and assemble contributions / ROI / parameter
-tables for the Results tab.
+Full RBE MMM pipeline: sample the joint posterior (parameters + latent
+state path) with NUTS on the training window, then assemble contributions /
+ROI / parameter tables and credible bands for the Results tab.
 
-Two entry points:
-  - run_full_ekf_pipeline: single dependent variable (univariate RBE).
-  - run_multi_dependent_pipeline: one or two dependent variables. When a
-    second dependent variable is configured, the two equations are fitted
-    JOINTLY with a bivariate Kalman filter (shared time index, correlated
-    observation errors) rather than as two separate, independent fits —
-    see modules/kalman.py::run_bivariate_kalman_filter for the state-space
-    derivation.
+The state-space equations are unchanged (see modules/statespace.py); only
+the inference engine changed — the Kalman filter / RTS smoother / point-
+estimate optimizers were replaced by MCMC (see modules/mcmc.py).
+
+Entry points:
+  - run_full_pipeline:       single dependent variable.
+  - run_multi_dependent_pipeline: one or two dependent variables. With a
+    second dependent variable the two equations are sampled JOINTLY
+    (shared time index, correlated observation errors rho, optional
+    cross-intercept coupling phi_1 / phi_2).
+  - run_chained_dependent_pipeline: Dependent 2 fitted first, its fitted
+    path then drives Dependent 1.
+
+What the numbers mean now:
+  * params        posterior MEDIAN of every parameter
+  * x_smooth      posterior MEAN of the latent states (the analogue of the
+                  old RTS-smoothed states; contributions are linear in it)
+  * P_smooth      posterior covariance of the states across draws
+  * *_lo / *_hi   95% credible bands from the thinned posterior draws
+  * loglik        posterior-mean training log-likelihood
+  * holdout rows  true forecasts: the holdout target is never seen
 """
 
 import numpy as np
 import pandas as pd
-from scipy.optimize import minimize
 
-from modules.dependencies import NEVERGRAD_AVAILABLE
 from modules.params import _make_globals, unpack_theta
-from modules.bounds import _build_theta0_and_bounds, build_normalized_problem
-from modules.optimizer import run_nevergrad_optimizer, run_nevergrad_optimizer_joint
-from modules.kalman import (
-    run_kalman_filter, run_bivariate_kalman_filter, rts_smoother,
-    _precompute_adstocked, _build_observation_matrix, build_static_cache,
-    joint_composite_loss, compute_joint_nrmse,
-)
+from modules.bounds import _build_theta0_and_bounds
+from modules.statespace import _precompute_adstocked, _build_observation_matrix
 from modules.transforms import apply_transformation, hill_transform_vec
 from modules.metrics import safe_mape
 
@@ -34,13 +40,20 @@ from modules.metrics import safe_mape
 
 def _postprocess_equation(df_full, g, params, x_smooth, adstocked_media,
                            cross_beta_contrib, opt_success, opt_nit, loglik,
-                           n_train=None):
+                           n_train=None, lt_override=None, carry_override=None):
     """
-    Given a fitted/smoothed state trajectory for ONE equation (one
-    dependent variable), builds: smoothed yhat, MAPE/R2, the contribution
+    Given a fitted state trajectory for ONE equation (one dependent
+    variable — under MCMC, the posterior-mean states), builds: smoothed yhat, MAPE/R2, the contribution
     table, ROI table, synergy table and parameter table. Used identically
-    whether that equation came from the single-dependent univariate filter
-    or from one half of the joint bivariate filter.
+    whether that equation came from a single-dependent fit or from one
+    half of the joint bivariate fit.
+
+    `lt_override` (T, N_EFFECTORS) and `carry_override` (T,) carry the
+    per-draw posterior means of the long-term intercept pieces
+    (gamma_k * f(effector_k) and G0 * I_{t-1}). Those are nonlinear in the
+    parameters, so averaging per draw is more faithful than plugging the
+    posterior median into the formula. When omitted, the old plug-in
+    formulas are used.
     """
     TARGET_COL = g["TARGET_COL"]; MEDIA_COLS = g["MEDIA_COLS"]
     COMP_MEDIA_COLS = g["COMP_MEDIA_COLS"]; PRICE_COLS = g["PRICE_COLS"]
@@ -76,7 +89,7 @@ def _postprocess_equation(df_full, g, params, x_smooth, adstocked_media,
 
     # Baseline floor — a market-mix baseline shouldn't be negative or
     # near-zero. The forward filter already floors it (see
-    # modules/kalman.py::_apply_beta_floors), but the RTS backward pass
+    # modules/statespace.py::_apply_beta_floors), but posterior averaging
     # can still pull it below the floor again since smoothing is an
     # unconstrained blend of filtered + next-period-smoothed values.
     min_base_fraction = float(g.get("MIN_BASE_FRACTION", 0.0))
@@ -147,6 +160,8 @@ def _postprocess_equation(df_full, g, params, x_smooth, adstocked_media,
     prev_intercept[1:] = x_smooth[:-1, 0]
     prev_intercept[0]  = x_smooth[0, 0]
     intercept_carryover = G0 * prev_intercept
+    if carry_override is not None:
+        intercept_carryover = np.asarray(carry_override, dtype=float)
 
     # Short-term view: the intercept as it actually enters the observation
     # equation, Y_t = intercept_t + Σ beta_i,t * media_i,t + ...  (i.e. the
@@ -192,6 +207,9 @@ def _postprocess_equation(df_full, g, params, x_smooth, adstocked_media,
     INTERCEPT_TRANSFORM_TYPE = g.get("INTERCEPT_TRANSFORM_TYPE", "power")
     for k, col in enumerate(g["INTERCEPT_EFFECTORS"]):
         if col not in df_full.columns:
+            continue
+        if lt_override is not None:
+            contrib_df[f"LongTerm_{col}"] = np.asarray(lt_override)[:, k]
             continue
         ni_int = params["n_intercept"][k]
         si_int = params["S_intercept"][k]
@@ -367,436 +385,283 @@ def _postprocess_equation(df_full, g, params, x_smooth, adstocked_media,
     }
 
 
-# ── Single-dependent-variable pipeline (univariate RBE) ──────────────────────
+# ── MCMC fit driver (shared by every pipeline below and by refit.py) ────────
 
-def run_full_ekf_pipeline(df_full, config, max_iter, method, ng_cfg=None):
-    g = _make_globals(config)
-    n_train  = config["n_train"]
-    df_train = df_full.iloc[:n_train].copy().reset_index(drop=True)
-    theta0, bounds = _build_theta0_and_bounds(df_train, g)
+def _run_mcmc_fit(df_full, n_train, eq_inputs, mcmc_cfg=None, joint=None,
+                  theta_init=None, progress_cb=None):
+    """
+    Sample the joint posterior over (parameters, latent state path) for one
+    equation (single-dependent) or two equations (joint bivariate).
 
-    # The observation matrix depends only on (df, g), never on the theta
-    # being searched over — build it once per optimization run instead of
-    # on every single candidate evaluation.
-    static_cache_train = build_static_cache(df_train, g)
+    eq_inputs : list of dict(g=..., theta0=..., bounds=...) — theta0/bounds
+                exactly as modules/bounds.py builds them (bounds become the
+                prior support; lo == hi pins a parameter).
+    joint     : None, or dict(use_coupling, allow_phi1, allow_phi2).
+    theta_init: optional flat theta vector used to START the chains
+                (warm start for Tab 8 refits); default = prior medians.
+    """
+    from modules import mcmc as M   # imported lazily: JAX/NumPyro are heavy
 
-    if method == "Nevergrad" and NEVERGRAD_AVAILABLE and ng_cfg:
-        best_theta, _ = run_nevergrad_optimizer(df_train, g, theta0, bounds, ng_cfg,
-                                                  static_cache=static_cache_train)
-        opt_success = True; opt_nit = ng_cfg.get("budget", 500)
-    else:
-        # See modules/bounds.py::build_normalized_problem for why this
-        # normalization matters: without it, L-BFGS-B/SLSQP's single
-        # scalar finite-difference `eps` applied across theta's wildly
-        # different natural scales (Hill's n ~ O(1-15) next to S ~ O(1e8))
-        # leaves small-range parameters like `n` stuck exactly at their
-        # init value — their true gradient signal is below the numerical
-        # noise floor of the Kalman recursion at the default step size.
-        theta0_norm, norm_bounds, unscale = build_normalized_problem(theta0, bounds)
+    cfg = M.mcmc_cfg_with_defaults(mcmc_cfg)
+    df_tr = df_full.iloc[:n_train].reset_index(drop=True)
 
-        def objective(theta_norm):
-            theta = unscale(theta_norm)
-            p = unpack_theta(theta, g)
-            _, _, _, _, _, _, _, _, loglik = run_kalman_filter(
-                df_train, p, g, static_cache=static_cache_train)
-            return -loglik
-        opt = minimize(objective, theta0_norm, method=method,
-                       bounds=norm_bounds,
-                       options={"maxiter": max_iter, "ftol": 1e-9, "eps": 1e-6})
-        best_theta = unscale(opt.x); opt_success = opt.success; opt_nit = opt.nit
+    eqs, priors, labels = [], [], []
+    multi = len(eq_inputs) > 1
+    for k, e in enumerate(eq_inputs):
+        priors.append(M.build_prior(df_tr, e["g"], e["theta0"], e["bounds"]))
+        eqs.append(dict(g=e["g"], st=M.build_eq_static(df_full, e["g"], n_train),
+                        n_theta=len(e["theta0"])))
+        labels += M.theta_labels(e["g"], prefix=(f"d{k + 1}:" if multi else ""))
+    if joint is not None:
+        extras = M.joint_extras_prior(joint["use_coupling"], joint["allow_phi1"], joint["allow_phi2"])
+        priors.append(extras)
+        labels += ["rho"] + (["phi1", "phi2"] if joint["use_coupling"] else [])
+    prior = M.concat_priors(priors)
 
-    params = unpack_theta(best_theta, g)
-    static_cache_full = build_static_cache(df_full, g)
-    yhat, residuals, x_filt, P_filt, x_pred, P_pred, Tmat, cross_beta_contrib, loglik = \
-        run_kalman_filter(df_full, params, g, static_cache=static_cache_full)
-    x_smooth, P_smooth = rts_smoother(x_filt, P_filt, x_pred, P_pred, Tmat)
+    model, pieces = M.make_model(eqs, prior, joint=joint)
+    u_init = M.inverse_map_prior(theta_init, prior) if theta_init is not None else None
 
-    adstocked_media = _precompute_adstocked(df_full, g, params)
-    result = _postprocess_equation(
-        df_full, g, params, x_smooth, adstocked_media, cross_beta_contrib,
-        opt_success, opt_nit, loglik, n_train=n_train,
+    samples, diag = M.run_nuts(model, pieces, cfg, u_init=u_init, progress_cb=progress_cb)
+    if progress_cb:
+        progress_cb(1.0, "Post-processing posterior draws …")
+    post = M.posterior_states(pieces, samples, cfg["n_keep"])
+
+    th_by_chain = samples["theta"]
+    theta_med = np.median(th_by_chain.reshape(-1, th_by_chain.shape[-1]), axis=0)
+    summary = M.parameter_summary(th_by_chain, labels, prior["kind"])
+    rhat = summary["R-hat"].values
+    max_rhat = float(np.nanmax(rhat)) if np.isfinite(rhat).any() else float("nan")
+    min_ess = float(np.nanmin(summary["ESS"].values)) if len(summary) else float("nan")
+    diag = dict(diag, max_rhat=max_rhat, min_ess=min_ess, cfg=cfg)
+    converged = diag["divergences"] == 0 and (not np.isfinite(max_rhat) or max_rhat < 1.05)
+    return dict(post=post, theta_med=theta_med, summary=summary, diag=diag,
+                converged=bool(converged), eqs=eqs)
+
+
+def _add_posterior_bands(result, df_full, g, post_e):
+    """95% credible bands from the thinned posterior draws (replaces the old
+    smoother-covariance approximation): exact per-period, and — unlike the
+    old sum-of-variances shortcut — the total-contribution / ROI intervals
+    keep the autocorrelation of the states because each draw is a whole path."""
+    from modules.uncertainty import _linear_state_index_map
+
+    X_keep, lt_keep = post_e["X_keep"], post_e["lt_keep"]
+    contrib_df, roi_df = result["contrib_df"], result["roi_df"]
+    eff_cols = list(g["INTERCEPT_EFFECTORS"])
+    media_set = set(g["MEDIA_COLS"])
+    tot_lo, tot_hi, roi_lo, roi_hi, roi_med, p_pos = {}, {}, {}, {}, {}, {}
+
+    for state_i, col, _kind in _linear_state_index_map(g):
+        if col not in df_full.columns or f"ShortTerm_{col}" not in contrib_df.columns:
+            continue
+        raw = df_full[col].values.astype(float)
+        draws = X_keep[:, :, state_i] * raw[None, :]                  # (K, T)
+        lo, hi = np.percentile(draws, [2.5, 97.5], axis=0)
+        contrib_df[f"ShortTerm_{col}_lo"] = lo
+        contrib_df[f"ShortTerm_{col}_hi"] = hi
+        if col in media_set:
+            tot = draws.sum(axis=1)
+            if col in eff_cols:                                         # + LongTerm_{col}
+                tot = tot + lt_keep[:, :, eff_cols.index(col)].sum(axis=1)
+            row = roi_df.loc[roi_df["Channel"] == col]
+            if row.empty:
+                continue
+            ts = float(row["TotalSpend"].iloc[0])
+            tot_lo[col], tot_hi[col] = (float(v) for v in np.percentile(tot, [2.5, 97.5]))
+            if ts > 0:
+                roi = tot / ts
+                roi_lo[col], roi_hi[col] = (float(v) for v in np.percentile(roi, [2.5, 97.5]))
+                roi_med[col] = float(np.median(roi))
+                p_pos[col] = float(np.mean(roi > 0))
+
+    roi_df["TotalContrib_lo"] = roi_df["Channel"].map(tot_lo)
+    roi_df["TotalContrib_hi"] = roi_df["Channel"].map(tot_hi)
+    roi_df["ROI_lo"] = roi_df["Channel"].map(roi_lo)
+    roi_df["ROI_hi"] = roi_df["Channel"].map(roi_hi)
+    roi_df["ROI_median"] = roi_df["Channel"].map(roi_med)
+    roi_df["Prob_ROI_gt_0"] = roi_df["Channel"].map(p_pos)
+    result["uncertainty_note"] = (
+        "95% bands are credible intervals from the MCMC posterior draws "
+        f"({X_keep.shape[0]} thinned draws). Each draw is a complete state path, so "
+        "total-contribution and ROI intervals include the autocorrelation "
+        "between periods (the old Kalman-smoother band treated periods as independent)."
     )
-    result["P_smooth"] = P_smooth
     return result
 
 
-# ── Multi-dependent pipeline — now a genuine JOINT bivariate fit ────────────
+def _build_equation_result(df_full, g, fit, e_idx, theta_slice, n_train, loglik=None):
+    post_e = fit["post"]["eqs"][e_idx]
+    params = unpack_theta(fit["theta_med"][theta_slice], g)
+    adstocked = _precompute_adstocked(df_full, g, params)
+    result = _postprocess_equation(
+        df_full, g, params, post_e["x_mean"], adstocked, post_e["cross_mean"],
+        fit["converged"], fit["post"]["n_draws"],
+        fit["post"]["loglik_mean"] if loglik is None else loglik,
+        n_train=n_train, lt_override=post_e["lt_mean"], carry_override=post_e["carry_mean"],
+    )
+    result["P_smooth"] = post_e["P"]          # posterior state covariance, this equation's own block
+    result["state_offset"] = 0
+    _add_posterior_bands(result, df_full, g, post_e)
+    result["holdout_mode"] = "forecast"
+    result["mcmc"] = dict(summary=fit["summary"], diagnostics=fit["diag"],
+                          max_rhat=fit["diag"]["max_rhat"], min_ess=fit["diag"]["min_ess"],
+                          divergences=fit["diag"]["divergences"], converged=fit["converged"])
+    return result
 
-def run_multi_dependent_pipeline(df_full, config, max_iter, method, ng_cfg=None):
+
+# ── Single-dependent-variable pipeline ───────────────────────────────────────
+
+def run_full_pipeline(df_full, config, mcmc_cfg=None, progress_cb=None):
+    g = _make_globals(config)
+    n_train = config["n_train"]
+    df_train = df_full.iloc[:n_train].copy().reset_index(drop=True)
+    theta0, bounds = _build_theta0_and_bounds(df_train, g)
+    fit = _run_mcmc_fit(df_full, n_train, [dict(g=g, theta0=theta0, bounds=bounds)],
+                        mcmc_cfg, progress_cb=progress_cb)
+    return _build_equation_result(df_full, g, fit, 0, slice(0, len(theta0)), n_train)
+
+
+def _dependent2_config(config):
+    """Dependent 2's own config: its own predictor set / bounds / dummies /
+    intercept dynamics, falling back to Dependent 1's for older saved configs."""
+    config_2 = dict(config)
+    config_2["target"]          = config["target2"]
+    config_2["media"]           = config.get("media_2")           or config["media"]
+    config_2["non_media"]       = config.get("non_media_2", config["non_media"])
+    config_2["comp_media"]      = config.get("comp_media_2", config["comp_media"])
+    config_2["comp_nonmedia"]   = config.get("comp_nonmedia_2", config["comp_nonmedia"])
+    config_2["price"]           = config.get("price_2", config["price"])
+    config_2["use_price"]       = config.get("use_price_2", config["use_price"])
+    config_2["cross_media_map"] = config.get("cross_media_map_2", config["cross_media_map"])
+    config_2["positive_beta_cols"] = config.get("positive_beta_cols_2", config["positive_beta_cols"])
+    config_2["negative_beta_cols"] = config.get("negative_beta_cols_2", config["negative_beta_cols"])
+    # Each dependent gets its OWN spike/outlier dummies (Tab 5 · A2b).
+    config_2["dummy_cols"] = config.get("dummy_cols_2", config.get("dummy_cols", []))
+    config_2["intercept_dynamics_type"] = config.get(
+        "intercept_dynamics_type_2", config.get("intercept_dynamics_type", "carryover"))
+    config_2["initial_media_betas"]         = {c: 0.0     for c in config_2["media"]}
+    config_2["initial_comp_betas"]          = {c: -0.0001 for c in config_2["comp_media"]}
+    config_2["initial_own_nonmedia_betas"]  = {c: 0.0     for c in config_2["non_media"]}
+    config_2["initial_comp_nonmedia_betas"] = {c: -0.01   for c in config_2["comp_nonmedia"]}
+    config_2["initial_price_beta"]          = {c: -0.1    for c in config_2["price"]}
+    ie2 = config.get("intercept_effectors_2")
+    if ie2 is not None:
+        config_2["intercept_effectors"] = ie2
+    pcb_2 = config.get("per_channel_bounds_2")
+    if pcb_2:
+        config_2["per_channel_bounds"] = pcb_2
+    return config_2
+
+
+# ── Multi-dependent pipeline — a genuine JOINT bivariate posterior ──────────
+
+def run_multi_dependent_pipeline(df_full, config, mcmc_cfg=None, progress_cb=None):
     """
     Fits Dependent 1 (config["target"]) and, if a second dependent variable
-    is configured (config["target2"], e.g. Top-of-Mind / Consideration),
-    fits it TOGETHER with Dependent 1 using a single joint bivariate Kalman
-    filter:
+    is configured (config["target2"]), fits it TOGETHER with Dependent 1:
 
         [ y1_t ]   [ Intercept_1_t ]   [ beta_1_1_t ... beta_1_M_t ]
         [ y2_t ] = [ Intercept_2_t ] + [ beta_2_1_t ... beta_2_M_t ] · x_t
                                                             + correlated errors
 
-    The two equations share the same time index and the same raw
-    regressors x_t, but each keeps its own state dynamics (its own Ls, G0,
-    adstock, transform, and per-channel bounds via config["per_channel_bounds_2"]
-    if provided). What makes the fit "joint" rather than two independent
-    fits stitched together is:
-      1. A single optimizer call estimates BOTH equations' parameters
-         (theta_1, theta_2), the cross-equation error correlation rho,
-         AND the cross-intercept coupling coefficients phi_1/phi_2
-         simultaneously, by maximising the bivariate log-likelihood:
-             Intercept_1,t = G0_1·Intercept_1,t-1 + phi_1·Intercept_2,t-1 + effectors_1,t
-             Intercept_2,t = G0_2·Intercept_2,t-1 + phi_2·Intercept_1,t-1 + effectors_2,t
-         Which of phi_1/phi_2 actually get a free theta slot (vs. being
-         pinned at exactly 0) is controlled by config
-         "cross_intercept_coupling_mode" — "both" (default), "dep1_in_dep2"
-         (phi_2 only), "dep2_in_dep1" (phi_1 only), or "none" (neither).
-         See the CROSS_INTERCEPT_COUPLING_MODE block below.
-      2. At every time step, the Kalman gain is computed from the full
-         2x2 observation-noise covariance, so a surprising observation in
-         one equation also updates the other equation's state estimate
-         (through the off-diagonal covariance terms) at that same t.
+    Both equations' parameters, both latent state paths, the error
+    correlation rho and the cross-intercept coupling phi_1 / phi_2 are one
+    posterior, sampled in a single NUTS run:
+        Intercept_1,t = G0_1·Intercept_1,t-1 + phi_1·Intercept_2,t-1 + effectors_1,t
+        Intercept_2,t = G0_2·Intercept_2,t-1 + phi_2·Intercept_1,t-1 + effectors_2,t
+    Which of phi_1/phi_2 are free is set by config
+    "cross_intercept_coupling_mode" ("both" | "dep1_in_dep2" | "dep2_in_dep1"
+    | "none"); coupling only exists when BOTH intercepts are on carryover.
 
-    If no second dependent variable is configured, this transparently
-    falls back to the single-equation pipeline (results_2 is None).
-
-    Returns
-    -------
-    (results_1, results_2)
-        results_2 is None if no second dependent variable is configured.
-        When both are fitted, each result dict also carries "rho_y"
-        (estimated error correlation), "phi1"/"phi2" (estimated
-        cross-intercept coupling coefficients), and "joint_loglik"
-        (shared bivariate log-likelihood) for display/diagnostics.
+    Returns (results_1, results_2); results_2 is None with no second dependent.
     """
     target2 = config.get("target2")
     if not (config.get("enable_second_dependent") and target2):
-        results_1 = run_full_ekf_pipeline(df_full, config, max_iter, method, ng_cfg=ng_cfg)
-        return results_1, None
+        return run_full_pipeline(df_full, config, mcmc_cfg, progress_cb=progress_cb), None
 
-    # ── Build per-equation configs / globals ─────────────────────────
-    # Dependent 2 can reuse Dependent 1's exact predictor set (default,
-    # backward-compatible with older saved configs that have no _2 keys),
-    # or use its own independently-selected — and potentially overlapping —
-    # set of media / non-media / price / competitor variables, configured
-    # in Tab 5 · Section A3.
     config_1 = dict(config)
-    config_2 = dict(config)
-    config_2["target"]          = target2
-    config_2["media"]           = config.get("media_2")           or config["media"]
-    config_2["non_media"]       = config.get("non_media_2", config["non_media"])
-    config_2["comp_media"]      = config.get("comp_media_2", config["comp_media"])
-    config_2["comp_nonmedia"]   = config.get("comp_nonmedia_2", config["comp_nonmedia"])
-    config_2["price"]           = config.get("price_2", config["price"])
-    config_2["use_price"]       = config.get("use_price_2", config["use_price"])
-    config_2["cross_media_map"] = config.get("cross_media_map_2", config["cross_media_map"])
-    config_2["positive_beta_cols"] = config.get("positive_beta_cols_2", config["positive_beta_cols"])
-    config_2["negative_beta_cols"] = config.get("negative_beta_cols_2", config["negative_beta_cols"])
-    # Spike/outlier impulse dummies (see modules/spike_dummies.py /
-    # Tab 5 · Section A2b): each dependent gets its OWN dummy columns by
-    # default (dummy_cols_2, generated against target2's own series) — NOT
-    # config_1's dummy_cols, which would otherwise put Dependent 1's spike
-    # dummies into Dependent 2's equation too (harmless — an irrelevant
-    # dummy just settles near a ~0 beta — but pointless extra state
-    # dimensions). Falls back to sharing config["dummy_cols"] only for
-    # older saved configs that predate "dummy_cols_2" entirely.
-    config_2["dummy_cols"] = config.get("dummy_cols_2", config.get("dummy_cols", []))
-    # Dependent 2 also gets its OWN intercept dynamics choice (Tab 4 ·
-    # "Intercept Dynamics") — carryover AR(1) baseline vs. a simple/constant
-    # regression baseline — independent of Dependent 1's. Falls back to
-    # Dependent 1's value for older saved configs that predate the
-    # per-dependent split.
-    config_2["intercept_dynamics_type"] = config.get(
-        "intercept_dynamics_type_2", config.get("intercept_dynamics_type", "carryover"))
-    # different) channel lists rather than reusing Dep 1's, which may not
-    # even contain the same columns.
-    config_2["initial_media_betas"]         = {c: 0.0     for c in config_2["media"]}
-    config_2["initial_comp_betas"]          = {c: -0.0001 for c in config_2["comp_media"]}
-    config_2["initial_own_nonmedia_betas"]  = {c: 0.0     for c in config_2["non_media"]}
-    config_2["initial_comp_nonmedia_betas"] = {c: -0.01   for c in config_2["comp_nonmedia"]}
-    config_2["initial_price_beta"]          = {c: -0.1    for c in config_2["price"]}
+    config_2 = _dependent2_config(config)
+    g1, g2 = _make_globals(config_1), _make_globals(config_2)
 
-    ie2 = config.get("intercept_effectors_2")
-    if ie2 is not None:
-        config_2["intercept_effectors"] = ie2
-    pcb_2 = config.get("per_channel_bounds_2")
-    if pcb_2:
-        config_2["per_channel_bounds"] = pcb_2
-
-    g1 = _make_globals(config_1)
-    g2 = _make_globals(config_2)
-
-    n_train  = config["n_train"]
+    n_train = config["n_train"]
     df_train = df_full.iloc[:n_train].copy().reset_index(drop=True)
-
     theta0_1, bounds1 = _build_theta0_and_bounds(df_train, g1)
     theta0_2, bounds2 = _build_theta0_and_bounds(df_train, g2)
-    n1 = len(theta0_1)
-    n2 = len(theta0_2)
+    n1, n2 = len(theta0_1), len(theta0_2)
 
-    rho0 = 0.0
-    rho_bounds = (-0.95, 0.95)
-    # Cross-intercept coupling — see modules/kalman.py module docstring:
-    #   Intercept_1,t = G0_1·Intercept_1,t-1 + phi_1·Intercept_2,t-1 + effectors_1,t
-    #   Intercept_2,t = G0_2·Intercept_2,t-1 + phi_2·Intercept_1,t-1 + effectors_2,t
-    # phi is itself a carryover mechanism (it references the OTHER
-    # equation's PREVIOUS intercept), so it only makes sense — and only
-    # gets a theta slot — when BOTH equations are on "carryover" intercept
-    # dynamics. g1/g2 now each carry their OWN "intercept_dynamics_type"
-    # (Tab 4 lets Dependent 1 and Dependent 2 pick independently), so both
-    # must be checked — either one being "simple" disables coupling.
-    # In "simple" mode the theta_joint layout is simply [theta_1|theta_2|rho]
-    # (one fewer block than the carryover-mode layout below) — every
-    # downstream reader (optimizer.py, and the extraction code further
-    # down) infers which layout it got from len(theta_joint) - (n1+n2)
-    # rather than assuming a fixed width, so nothing else needs to branch
-    # on this flag.
-    #
-    # On top of that carryover gate, CROSS_INTERCEPT_COUPLING_MODE (still
-    # shared across g1/g2 — checking g1 is sufficient) picks which
-    # direction(s) of coupling are actually estimated:
-    #   "both"         -> phi_1 and phi_2 both free
-    #   "dep1_in_dep2" -> only phi_2 free (Dep1's previous intercept feeds
-    #                     Dep2's equation); phi_1 pinned to 0
-    #   "dep2_in_dep1" -> only phi_1 free (Dep2's previous intercept feeds
-    #                     Dep1's equation); phi_2 pinned to 0
-    #   "none"         -> same as "simple" intercept dynamics for coupling
-    #                     purposes — no phi theta slots at all
     coupling_mode = g1.get("CROSS_INTERCEPT_COUPLING_MODE", "both")
-    use_cross_intercept_coupling = (
+    use_coupling = (
         g1.get("INTERCEPT_DYNAMICS_TYPE", "carryover") != "simple"
         and g2.get("INTERCEPT_DYNAMICS_TYPE", "carryover") != "simple"
         and coupling_mode != "none"
     )
-    # allow_phi1/allow_phi2 also gate the objective function and the
-    # best-theta extraction below, so a direction that's "pinned to 0" via
-    # bounds is ALSO forced to exactly 0.0 there — belt and suspenders,
-    # since a (0.0, 0.0) bound only constrains the optimizer's search, not
-    # the tiny numerical floor `build_normalized_problem` uses internally.
-    allow_phi1 = coupling_mode in ("both", "dep2_in_dep1")  # Dep2 -> Dep1
-    allow_phi2 = coupling_mode in ("both", "dep1_in_dep2")  # Dep1 -> Dep2
-    phi1_0, phi2_0 = 0.0, 0.0
-    phi1_bounds = (0.0, None) if allow_phi1 else (0.0, 0.0)
-    phi2_bounds = (0.0, None) if allow_phi2 else (0.0, 0.0)
-    if use_cross_intercept_coupling:
-        theta0_joint = np.concatenate([theta0_1, theta0_2, [rho0, phi1_0, phi2_0]])
-        bounds_joint = list(bounds1) + list(bounds2) + [rho_bounds, phi1_bounds, phi2_bounds]
-    else:
-        theta0_joint = np.concatenate([theta0_1, theta0_2, [rho0]])
-        bounds_joint = list(bounds1) + list(bounds2) + [rho_bounds]
-    # Safety net (mirrors modules/bounds.py): guarantees theta0_joint[i] always
-    # lies inside bounds_joint[i], since the rho/phi appends above happen after
-    # theta0_1/theta0_2 were already clipped individually and aren't covered by
-    # that earlier clip.
-    theta0_joint = np.array([
-        float(np.clip(v,
-                       lo if lo is not None else -np.inf,
-                       hi if hi is not None else  np.inf))
-        for v, (lo, hi) in zip(theta0_joint, bounds_joint)
-    ])
+    allow_phi1 = coupling_mode in ("both", "dep2_in_dep1")   # Dep2 -> Dep1
+    allow_phi2 = coupling_mode in ("both", "dep1_in_dep2")   # Dep1 -> Dep2
 
-    static_cache1_train = build_static_cache(df_train, g1)
-    static_cache2_train = build_static_cache(df_train, g2)
+    fit = _run_mcmc_fit(
+        df_full, n_train,
+        [dict(g=g1, theta0=theta0_1, bounds=bounds1), dict(g=g2, theta0=theta0_2, bounds=bounds2)],
+        mcmc_cfg, joint=dict(use_coupling=use_coupling, allow_phi1=allow_phi1, allow_phi2=allow_phi2),
+        progress_cb=progress_cb)
 
-    # ── Auto-scale λ for the NRMSE regularization term ───────────────────
-    # Loss(Θ) = NLL(Θ) + λ·NRMSE(Θ), where NLL is the joint bivariate EKF
-    # negative log-likelihood and NRMSE = RMSE_1/ȳ_1 + RMSE_2/ȳ_2 (see
-    # modules/kalman.py::joint_composite_loss). λ is fixed ONCE here, at
-    # the starting point θ0 — not re-estimated every optimizer iteration,
-    # which would make the objective a moving target the optimizer could
-    # never converge against. It's picked so the two terms contribute
-    # comparably (50/50) to the loss AT θ0: λ = |NLL(θ0)| / NRMSE(θ0).
-    p1_0 = unpack_theta(theta0_1, g1)
-    p2_0 = unpack_theta(theta0_2, g2)
-    _, nll0, nrmse0, _, _ = joint_composite_loss(
-        df_train, p1_0, g1, p2_0, g2, rho0, phi1_0, phi2_0, lambda_reg=0.0,
-        static_cache1=static_cache1_train, static_cache2=static_cache2_train)
-    lambda_reg = abs(nll0) / max(nrmse0, 1e-8)
+    th = fit["theta_med"]
+    best_rho = float(np.clip(th[n1 + n2], -0.995, 0.995))
+    best_phi1 = float(th[n1 + n2 + 1]) if use_coupling and allow_phi1 else 0.0
+    best_phi2 = float(th[n1 + n2 + 2]) if use_coupling and allow_phi2 else 0.0
+    joint_loglik = fit["post"]["loglik_mean"]
 
-    # ── Loss function selection (Tab 4 · Model Configuration) ────────────
-    # "nll_nrmse" (default): Loss(Θ) = NLL(Θ) + λ·NRMSE(Θ) as auto-scaled
-    #   above. "nll_only": pure bivariate EKF negative log-likelihood,
-    #   λ forced to 0 so the NRMSE term never enters the optimizer's
-    #   objective (it's still computed/reported as a diagnostic below).
-    loss_function_mode = config.get("loss_function_mode", "nll_nrmse")
-    if loss_function_mode == "nll_only":
-        lambda_reg = 0.0
+    results_1 = _build_equation_result(df_full, g1, fit, 0, slice(0, n1), n_train, loglik=joint_loglik)
+    results_2 = _build_equation_result(df_full, g2, fit, 1, slice(n1, n1 + n2), n_train, loglik=joint_loglik)
 
-    if method == "Nevergrad" and NEVERGRAD_AVAILABLE and ng_cfg:
-        best_theta_joint, _ = run_nevergrad_optimizer_joint(
-            df_train, g1, g2, theta0_joint, bounds_joint, n1, n2, ng_cfg,
-            static_cache1=static_cache1_train, static_cache2=static_cache2_train,
-            lambda_reg=lambda_reg)
-        opt_success = True; opt_nit = ng_cfg.get("budget", 500)
-    else:
-        # Same normalization fix as the single-dependent path above (see
-        # modules/bounds.py::build_normalized_problem) — theta_joint mixes
-        # the same wide-scale parameters (twice over, once per dependent
-        # variable) plus rho/phi, so it needs it just as much.
-        theta0_joint_norm, norm_bounds_joint, unscale_joint = build_normalized_problem(
-            theta0_joint, bounds_joint)
-
-        def objective(theta_joint_norm):
-            theta_joint = unscale_joint(theta_joint_norm)
-            theta1 = theta_joint[:n1]
-            theta2 = theta_joint[n1:n1+n2]
-            rho    = theta_joint[n1+n2]
-            if len(theta_joint) - (n1 + n2) >= 3:
-                phi1 = theta_joint[n1+n2+1] if allow_phi1 else 0.0
-                phi2 = theta_joint[n1+n2+2] if allow_phi2 else 0.0
-            else:
-                phi1 = phi2 = 0.0
-            p1 = unpack_theta(theta1, g1)
-            p2 = unpack_theta(theta2, g2)
-            loss, _, _, _, _ = joint_composite_loss(
-                df_train, p1, g1, p2, g2, rho, phi1, phi2, lambda_reg,
-                static_cache1=static_cache1_train, static_cache2=static_cache2_train)
-            return loss
-        opt = minimize(objective, theta0_joint_norm, method=method,
-                        bounds=norm_bounds_joint,
-                        options={"maxiter": max_iter, "ftol": 1e-9, "eps": 1e-6})
-        best_theta_joint = unscale_joint(opt.x); opt_success = opt.success; opt_nit = opt.nit
-
-    best_theta1 = best_theta_joint[:n1]
-    best_theta2 = best_theta_joint[n1:n1+n2]
-    best_rho    = float(np.clip(best_theta_joint[n1+n2], -0.995, 0.995))
-    if len(best_theta_joint) - (n1 + n2) >= 3:
-        best_phi1 = float(best_theta_joint[n1+n2+1]) if allow_phi1 else 0.0
-        best_phi2 = float(best_theta_joint[n1+n2+2]) if allow_phi2 else 0.0
-    else:
-        best_phi1 = 0.0
-        best_phi2 = 0.0
-    params1 = unpack_theta(best_theta1, g1)
-    params2 = unpack_theta(best_theta2, g2)
-
-    # ── Run the joint filter on the FULL dataset with the fitted params ──
-    static_cache1_full = build_static_cache(df_full, g1)
-    static_cache2_full = build_static_cache(df_full, g2)
-    (yhat_joint, residuals_joint, x_filt, P_filt, x_pred, P_pred, Tmat_joint,
-     cross1, cross2, joint_loglik, dim1, dim2) = run_bivariate_kalman_filter(
-        df_full, params1, g1, params2, g2, best_rho, best_phi1, best_phi2,
-        static_cache1=static_cache1_full, static_cache2=static_cache2_full)
-
-    # RTS smoother is dimension-agnostic — run once on the joint state
-    x_smooth_joint, P_smooth_joint = rts_smoother(x_filt, P_filt, x_pred, P_pred, Tmat_joint)
-    x_smooth_1 = x_smooth_joint[:, :dim1]
-    x_smooth_2 = x_smooth_joint[:, dim1:]
-
-    adstocked_media_1 = _precompute_adstocked(df_full, g1, params1)
-    adstocked_media_2 = _precompute_adstocked(df_full, g2, params2)
-
-    results_1 = _postprocess_equation(
-        df_full, g1, params1, x_smooth_1, adstocked_media_1, cross1,
-        opt_success, opt_nit, joint_loglik, n_train=n_train,
-    )
-    results_2 = _postprocess_equation(
-        df_full, g2, params2, x_smooth_2, adstocked_media_2, cross2,
-        opt_success, opt_nit, joint_loglik, n_train=n_train,
-    )
-
-    # NRMSE regularization diagnostics, evaluated on the FULL dataset with
-    # the fitted params (same pattern as joint_loglik above) — lets the
-    # Results tab show what the regularizer actually saw, even though the
-    # optimizer itself only ever saw the train-window version of these.
-    full_nrmse, full_rmse1, full_rmse2 = compute_joint_nrmse(residuals_joint, df_full, g1, g2)
-
+    ybar1 = float(df_full[g1["TARGET_COL"]].mean()) or 1e-8
+    ybar2 = float(df_full[g2["TARGET_COL"]].mean()) or 1e-8
+    rmse1 = float(np.sqrt(np.mean(results_1["residuals"] ** 2)))
+    rmse2 = float(np.sqrt(np.mean(results_2["residuals"] ** 2)))
     for res in (results_1, results_2):
         res["rho_y"] = best_rho
-        res["phi1"] = best_phi1  # coefficient of Intercept_Dep2,t-1 in Dep1's intercept eq
-        res["phi2"] = best_phi2  # coefficient of Intercept_Dep1,t-1 in Dep2's intercept eq
-        res["cross_intercept_coupling_mode"] = coupling_mode  # "both" | "dep1_in_dep2" | "dep2_in_dep1" | "none"
+        res["phi1"] = best_phi1
+        res["phi2"] = best_phi2
+        res["cross_intercept_coupling_mode"] = coupling_mode
         res["joint_loglik"] = joint_loglik
         res["joint_fit"] = True
-        res["P_smooth"] = P_smooth_joint  # joint covariance (block layout: dim1 then dim2)
-        res["lambda_reg"] = lambda_reg          # auto-scaled λ, fixed at θ0 (see above); 0.0 if loss_function_mode == "nll_only"
-        res["loss_function_mode"] = loss_function_mode  # "nll_nrmse" | "nll_only"
-        res["nrmse_reg"] = full_nrmse           # RMSE_1/ȳ_1 + RMSE_2/ȳ_2, full data (reported even in nll_only mode)
-        res["rmse_dep1"] = full_rmse1
-        res["rmse_dep2"] = full_rmse2
-
+        # MCMC has no NRMSE penalty in its objective (the posterior is
+        # likelihood x priors); these are reported as diagnostics only.
+        res["lambda_reg"] = 0.0
+        res["loss_function_mode"] = "nll_only"
+        res["nrmse_reg"] = rmse1 / abs(ybar1) + rmse2 / abs(ybar2)
+        res["rmse_dep1"] = rmse1
+        res["rmse_dep2"] = rmse2
     return results_1, results_2
 
 
 # ── Chained / sequential pipeline — Dependent 2 feeds Dependent 1 as x_t ────
 
-def run_chained_dependent_pipeline(df_full, config, max_iter, method, ng_cfg=None):
+def run_chained_dependent_pipeline(df_full, config, mcmc_cfg=None, progress_cb=None):
     """
     Chained (mediation-style) two-stage fit, as an alternative to the joint
-    bivariate fit above.
+    fit above: Dependent 2 is fitted completely on its own first; its
+    posterior-mean fitted path (or its raw actuals, config["chain_use_fitted"]
+    = False) is then added as ONE new predictor to Dependent 1's equation
+    (config["chain_driver_role"]: "media" or "non_media"), and Dependent 1 is
+    fitted on its own. Two separate MCMC runs connected only through that
+    one column.
 
-    Stage 1 — Dependent 2 (config["target2"]) is fitted completely on its
-    own, exactly like a single-dependent RBE model: its own predictors, own
-    adstock/saturation, own equation, own optimizer run
-    (run_full_ekf_pipeline). It is a genuine KPI fit with its own
-    contributions / ROI / parameter tables.
-
-    Stage 2 — Dependent 2's resulting SMOOTHED trajectory
-    (config["chain_use_fitted"] = True, the default) — or, if
-    config["chain_use_fitted"] is False, its raw actual column as-is — is
-    added to the dataset as one new predictor and handed to Dependent 1
-    (config["target"])'s own equation, in the role given by
-    config["chain_driver_role"] ("media": gets its own adstock + saturation
-    curve like a channel; "non_media": a direct beta, no adstock/saturation,
-    like an organic control). Dependent 1 is then fitted on its own too
-    (a second, separate run_full_ekf_pipeline call) — so Dependent 2 ends up
-    being BOTH a KPI in its own right AND an x-variable driving Dependent 1.
-
-    This differs from run_multi_dependent_pipeline (joint mode): there the
-    two equations share a single estimation step and only influence each
-    other through a correlated-error / cross-intercept term. Here they are
-    two fully separate optimizer calls, run strictly in sequence, connected
-    only through the one new predictor column.
-
-    Returns
-    -------
-    (results_1, results_2, df_with_driver, driver_col)
-        results_2 : Dependent 2's own standalone fit (same shape as
-            run_full_ekf_pipeline's return).
-        results_1 : Dependent 1's fit, run on `df_with_driver` and carrying
-            two extra keys: "chain_driver_col" (the new predictor's name)
-            and "chain_use_fitted".
-        df_with_driver : df_full plus the new driver column (or df_full
-            unchanged if chain_use_fitted is False, since the raw target2
-            column is already present).
-        driver_col : name of the new predictor column fed into Dependent 1
-            (None if no second dependent variable is configured at all).
+    Returns (results_1, results_2, df_with_driver, driver_col).
     """
     target2 = config.get("target2")
     if not (config.get("enable_second_dependent") and target2):
-        results_1 = run_full_ekf_pipeline(df_full, config, max_iter, method, ng_cfg=ng_cfg)
-        return results_1, None, df_full, None
+        return run_full_pipeline(df_full, config, mcmc_cfg, progress_cb=progress_cb), None, df_full, None
 
-    # ── Stage 1: fit Dependent 2 completely on its own ───────────────────
-    config_2 = dict(config)
-    config_2["target"]                  = target2
+    def _stage_cb(lo, hi):
+        if progress_cb is None:
+            return None
+        return lambda frac, txt: progress_cb(lo + (hi - lo) * frac, txt)
+
+    # ── Stage 1: Dependent 2 on its own ──────────────────────────────────
+    config_2 = _dependent2_config(config)
     config_2["enable_second_dependent"] = False
-    config_2["target2"]                 = None
-    config_2["media"]           = config.get("media_2")           or config["media"]
-    config_2["non_media"]       = config.get("non_media_2", config["non_media"])
-    config_2["comp_media"]      = config.get("comp_media_2", config["comp_media"])
-    config_2["comp_nonmedia"]   = config.get("comp_nonmedia_2", config["comp_nonmedia"])
-    config_2["price"]           = config.get("price_2", config["price"])
-    config_2["use_price"]       = config.get("use_price_2", config["use_price"])
-    config_2["cross_media_map"] = config.get("cross_media_map_2", config["cross_media_map"])
-    config_2["positive_beta_cols"] = config.get("positive_beta_cols_2", config["positive_beta_cols"])
-    config_2["negative_beta_cols"] = config.get("negative_beta_cols_2", config["negative_beta_cols"])
-    # See the identical note in run_multi_dependent_pipeline above — Dep 2
-    # gets its own spike/outlier dummies by default, not Dep 1's.
-    config_2["dummy_cols"] = config.get("dummy_cols_2", config.get("dummy_cols", []))
-    # Dependent 2 also gets its OWN intercept dynamics choice — see the
-    # identical note in run_multi_dependent_pipeline above.
-    config_2["intercept_dynamics_type"] = config.get(
-        "intercept_dynamics_type_2", config.get("intercept_dynamics_type", "carryover"))
-    config_2["initial_media_betas"]         = {c: 0.0     for c in config_2["media"]}
-    config_2["initial_comp_betas"]          = {c: -0.0001 for c in config_2["comp_media"]}
-    config_2["initial_own_nonmedia_betas"]  = {c: 0.0     for c in config_2["non_media"]}
-    config_2["initial_comp_nonmedia_betas"] = {c: -0.01   for c in config_2["comp_nonmedia"]}
-    config_2["initial_price_beta"]          = {c: -0.1    for c in config_2["price"]}
-    ie2 = config.get("intercept_effectors_2")
-    if ie2 is not None:
-        config_2["intercept_effectors"] = ie2
-    pcb_2 = config.get("per_channel_bounds_2")
-    if pcb_2:
-        config_2["per_channel_bounds"] = pcb_2
-
-    results_2 = run_full_ekf_pipeline(df_full, config_2, max_iter, method, ng_cfg=ng_cfg)
+    config_2["target2"] = None
+    results_2 = run_full_pipeline(df_full, config_2, mcmc_cfg, progress_cb=_stage_cb(0.0, 0.5))
 
     # ── Stage 2: inject Dependent 2's output as an x-driver, fit Dep 1 ───
     use_fitted  = config.get("chain_use_fitted", True)
@@ -840,7 +705,7 @@ def run_chained_dependent_pipeline(df_full, config, max_iter, method, ng_cfg=Non
     adstock_map.setdefault(driver_col, "instant")
     config_1["adstock_map"] = adstock_map
 
-    results_1 = run_full_ekf_pipeline(df_with_driver, config_1, max_iter, method, ng_cfg=ng_cfg)
+    results_1 = run_full_pipeline(df_with_driver, config_1, mcmc_cfg, progress_cb=_stage_cb(0.5, 1.0))
     results_1["chained_from_dep2"] = True
     results_1["chain_driver_col"]  = driver_col
     results_1["chain_use_fitted"]  = use_fitted

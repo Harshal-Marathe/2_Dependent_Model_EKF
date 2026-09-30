@@ -23,14 +23,9 @@ and modules/params.py::unpack_theta exactly — see `_block_slices` below.
 import copy
 
 import numpy as np
-from scipy.optimize import minimize
 
-from modules.dependencies import NEVERGRAD_AVAILABLE
 from modules.params import _make_globals, unpack_theta
-from modules.bounds import _build_theta0_and_bounds, build_normalized_problem
-from modules.optimizer import run_nevergrad_optimizer
-from modules.kalman import run_kalman_filter, rts_smoother, _precompute_adstocked, build_static_cache
-from modules.pipeline import _postprocess_equation
+from modules.bounds import _build_theta0_and_bounds
 
 
 # ────────────────────────────────────────────────────────────────────
@@ -140,76 +135,7 @@ def variable_role_lists(config: dict):
 # ────────────────────────────────────────────────────────────────────
 # Flat theta-vector block layout (must mirror bounds.py / params.py)
 # ────────────────────────────────────────────────────────────────────
-_BLOCK_TO_GKEY = {
-    "Ls": "MEDIA_COLS", "delta": "MEDIA_COLS",
-    "n_params": "MEDIA_COLS", "S_params": "MEDIA_COLS",
-    "gamma": "INTERCEPT_EFFECTORS", "n_intercept": "INTERCEPT_EFFECTORS",
-    "S_intercept": "INTERCEPT_EFFECTORS",
-    "Ls_own_nonmedia": "OWN_NONMEDIA_COLS", "delta_own_nonmedia": "OWN_NONMEDIA_COLS",
-    "Ls_comp_nonmedia": "COMP_NONMEDIA_COLS", "delta_comp_nonmedia": "COMP_NONMEDIA_COLS",
-    "Ls_comp": "COMP_MEDIA_COLS", "delta_comp": "COMP_MEDIA_COLS",
-    "n_comp": "COMP_MEDIA_COLS", "S_comp": "COMP_MEDIA_COLS",
-    "Ls_price": "PRICE_COLS", "delta_price": "PRICE_COLS",
-}
-
-
-def _block_slices(g: dict):
-    """Ordered list of theta blocks with (start, length, cols/pairs/scalar).
-    MUST stay in lockstep with bounds.py::_build_theta0_and_bounds and
-    params.py::unpack_theta — the three are the same layout, read three ways.
-    """
-    N_MEDIA = g["N_MEDIA"]; N_COMP = g["N_COMP"]
-    N_OWN_NONMEDIA = g["N_OWN_NONMEDIA"]; N_COMP_NONMEDIA = g["N_COMP_NONMEDIA"]
-    N_PRICE = g["N_PRICE"]; N_CROSS = g["N_CROSS"]; N_EFFECTORS = g["N_EFFECTORS"]
-    USE_ORGANIC_DRIFT = g["USE_ORGANIC_DRIFT"]
-    # Per-channel now: only channels individually on "weibull" (in ANY of
-    # media/comp_media/own_nonmedia/comp_nonmedia) get a shape/scale slot,
-    # in the fixed order g["ADSTOCK_WEIBULL_COLS"] (see modules/params.py).
-    adstock_weibull_cols = g.get("ADSTOCK_WEIBULL_COLS", [])
-    N_ADSTOCK = len(adstock_weibull_cols)
-
-    blocks = []
-    idx = 0
-
-    def add(name, length, cols=None, pairs=None, scalar=False):
-        nonlocal idx
-        blocks.append({"name": name, "start": idx, "length": length,
-                        "cols": cols, "pairs": pairs, "scalar": scalar})
-        idx += length
-
-    INTERCEPT_DYNAMICS_TYPE = g.get("INTERCEPT_DYNAMICS_TYPE", "carryover")
-
-    add("Ls", N_MEDIA, cols=g["MEDIA_COLS"])
-    if INTERCEPT_DYNAMICS_TYPE == "simple":
-        add("I0", 1, scalar=True)
-    else:
-        add("G0", 1, scalar=True)
-    add("delta", N_MEDIA, cols=g["MEDIA_COLS"])
-    add("gamma", N_EFFECTORS, cols=g["INTERCEPT_EFFECTORS"])
-    add("n_params", N_MEDIA, cols=g["MEDIA_COLS"])
-    add("S_params", N_MEDIA, cols=g["MEDIA_COLS"])
-    add("n_intercept", N_EFFECTORS, cols=g["INTERCEPT_EFFECTORS"])
-    add("S_intercept", N_EFFECTORS, cols=g["INTERCEPT_EFFECTORS"])
-    if N_ADSTOCK:
-        add("adstock_shape", N_ADSTOCK, cols=adstock_weibull_cols)
-        add("adstock_scale", N_ADSTOCK, cols=adstock_weibull_cols)
-    add("Ls_own_nonmedia", N_OWN_NONMEDIA, cols=g["OWN_NONMEDIA_COLS"])
-    add("Ls_comp_nonmedia", N_COMP_NONMEDIA, cols=g["COMP_NONMEDIA_COLS"])
-    add("delta_own_nonmedia", N_OWN_NONMEDIA, cols=g["OWN_NONMEDIA_COLS"])
-    add("delta_comp_nonmedia", N_COMP_NONMEDIA, cols=g["COMP_NONMEDIA_COLS"])
-    add("Ls_comp", N_COMP, cols=g["COMP_MEDIA_COLS"])
-    add("delta_comp", N_COMP, cols=g["COMP_MEDIA_COLS"])
-    add("n_comp", N_COMP, cols=g["COMP_MEDIA_COLS"])
-    add("S_comp", N_COMP, cols=g["COMP_MEDIA_COLS"])
-    add("cross_delta", N_CROSS, pairs=g["CROSS_MEDIA_PAIRS"])
-    add("cross_n", N_CROSS, pairs=g["CROSS_MEDIA_PAIRS"])
-    add("cross_S", N_CROSS, pairs=g["CROSS_MEDIA_PAIRS"])
-    add("Ls_price", N_PRICE, cols=g["PRICE_COLS"])
-    add("delta_price", N_PRICE, cols=g["PRICE_COLS"])
-    if USE_ORGANIC_DRIFT:
-        add("mu", 1, scalar=True)
-    add("sigma_y", 1, scalar=True)
-    return blocks
+from modules.layout import _BLOCK_TO_GKEY, theta_blocks, _block_slices  # noqa: F401
 
 
 def _bound_clip(b):
@@ -393,72 +319,35 @@ def editable_params_for_role(role, g, col=None):
 # ────────────────────────────────────────────────────────────────────
 # Refit entry point
 # ────────────────────────────────────────────────────────────────────
-def run_refit_pipeline(df_full, new_config, prev_result, max_iter, method,
+def run_refit_pipeline(df_full, new_config, prev_result, mcmc_cfg=None,
                         unfreeze_cols=None, freeze_existing=True,
-                        refit_sigma=True, refit_G0=False, ng_cfg=None,
-                        manual_overrides=None):
+                        refit_sigma=True, refit_G0=False,
+                        manual_overrides=None, progress_cb=None):
     """
-    Fit `new_config` warm-started from `prev_result` (a result dict from
-    run_full_ekf_pipeline / a previous call to this function — has "params"
+    Re-sample `new_config`, warm-started from `prev_result` (a result dict
+    from run_full_pipeline / a previous call to this function — has "params"
     and "g" keys). Returns a result dict shaped exactly like
-    run_full_ekf_pipeline's, so it can be dropped straight into Tab 7.
+    run_full_pipeline's, so it can be dropped straight into Tab 7.
 
-    `manual_overrides`: {col: {block_name: value}} — pins those specific
-    parameters to an exact value (no searching) regardless of everything
-    else. Everything else follows the usual freeze/unfreeze/warm-start
-    rules above.
+    Frozen parameters (lo == hi) stay FIXED in the posterior; free ones get
+    their usual prior and the chains START at the warm-started values.
+    `manual_overrides`: {col: {block_name: value}} pins those parameters.
     """
+    from modules.pipeline import _run_mcmc_fit, _build_equation_result
+
     g_new = _make_globals(new_config)
     n_train = new_config["n_train"]
     df_train = df_full.iloc[:n_train].copy().reset_index(drop=True)
-
     theta0_default, bounds_default = _build_theta0_and_bounds(df_train, g_new)
 
     prev_params = prev_result.get("params") if prev_result else None
     prev_g = prev_result.get("g") if prev_result else None
-
     theta0, bounds = build_warm_started_theta(
         g_new, theta0_default, bounds_default, prev_params, prev_g,
         unfreeze_cols=unfreeze_cols, freeze_existing=freeze_existing,
         refit_sigma=refit_sigma, refit_G0=refit_G0,
         manual_overrides=manual_overrides,
     )
-
-    static_cache_train = build_static_cache(df_train, g_new)
-
-    if method == "Nevergrad" and NEVERGRAD_AVAILABLE and ng_cfg:
-        best_theta, _ = run_nevergrad_optimizer(df_train, g_new, theta0, bounds, ng_cfg,
-                                                  static_cache=static_cache_train)
-        opt_success, opt_nit = True, ng_cfg.get("budget", 500)
-    else:
-        # Same fix as run_full_ekf_pipeline (see
-        # modules/bounds.py::build_normalized_problem) — refit's theta has
-        # the same wide-scale mix, so it's just as prone to `n` (and other
-        # small-range params) getting stuck at their warm-started/init
-        # value under a single unscaled finite-difference `eps`.
-        theta0_norm, norm_bounds, unscale = build_normalized_problem(theta0, bounds)
-
-        def objective(theta_norm):
-            theta = unscale(theta_norm)
-            p = unpack_theta(theta, g_new)
-            _, _, _, _, _, _, _, _, loglik = run_kalman_filter(
-                df_train, p, g_new, static_cache=static_cache_train)
-            return -loglik
-        opt = minimize(objective, theta0_norm, method=method,
-                        bounds=norm_bounds,
-                        options={"maxiter": max_iter, "ftol": 1e-9, "eps": 1e-6})
-        best_theta, opt_success, opt_nit = unscale(opt.x), opt.success, opt.nit
-
-    params = unpack_theta(best_theta, g_new)
-    static_cache_full = build_static_cache(df_full, g_new)
-    yhat, residuals, x_filt, P_filt, x_pred, P_pred, Tmat, cross_beta_contrib, loglik = \
-        run_kalman_filter(df_full, params, g_new, static_cache=static_cache_full)
-    x_smooth, P_smooth = rts_smoother(x_filt, P_filt, x_pred, P_pred, Tmat)
-
-    adstocked_media = _precompute_adstocked(df_full, g_new, params)
-    result = _postprocess_equation(
-        df_full, g_new, params, x_smooth, adstocked_media, cross_beta_contrib,
-        opt_success, opt_nit, loglik, n_train=n_train,
-    )
-    result["P_smooth"] = P_smooth
-    return result
+    fit = _run_mcmc_fit(df_full, n_train, [dict(g=g_new, theta0=theta0, bounds=bounds)],
+                        mcmc_cfg, theta_init=theta0, progress_cb=progress_cb)
+    return _build_equation_result(df_full, g_new, fit, 0, slice(0, len(theta0)), n_train)

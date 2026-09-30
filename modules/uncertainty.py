@@ -6,12 +6,11 @@ and re-applied post-smoothing in modules/pipeline.py::_postprocess_equation)
 are passed through completely unchanged everywhere in this module.
 
 Three pieces:
-  1. add_confidence_bands  — surfaces P_smooth (already computed by the RTS
-     smoother, see modules/kalman.py::rts_smoother) as 95% CI bands on
-     per-period contributions and on total contribution / ROI.
-  2. run_seed_stability    — refits the SAME config from several different
-     optimizer starting points (bounds untouched) and reports how much the
-     converged ROI / ranking moves.
+  1. add_confidence_bands  — normal-approximation 95% bands from the
+     posterior state covariance (P_smooth). Kept for older saved results;
+     MCMC results already carry exact posterior-draw credible bands.
+  2. run_seed_stability    — re-runs MCMC with several different seeds and
+     reports how much the ROI / ranking moves (a between-chain sanity check).
   3. compute_vif           — Variance Inflation Factor for the raw predictor
      matrix actually fed to a fitted equation's observation/state
      equations, to flag collinearity that makes individual channel
@@ -118,7 +117,7 @@ def add_confidence_bands(result, df_full):
     result["contrib_df"] = contrib_df
     result["roi_df"] = roi_df
     result["uncertainty_note"] = (
-        "95% bands come from the Kalman smoother's own posterior variance "
+        "95% bands come from the posterior state covariance "
         "(P_smooth). Per-period bands are exact under the fitted model. "
         "Total-contribution / ROI bands sum per-period variances (i.e. "
         "assume periods are independent); smoothed betas are actually "
@@ -172,113 +171,40 @@ def shortterm_total_ci(contrib_df):
 # 2. Multi-seed refit stability
 # ─────────────────────────────────────────────────────────────────────────
 
-def _random_theta0(theta0, bounds, rng, jitter_frac=0.35):
+def run_seed_stability(df_full, config, mcmc_cfg=None, n_seeds=3, base_seed=0, progress_cb=None):
     """
-    A perturbed starting point WITHIN the exact same `bounds` used for the
-    real fit (including the positivity/negativity beta-sign bounds like
-    (0, None) / (None, 0)) — only the search's starting guess moves, the
-    constraints themselves are untouched. Finite two-sided bounds are
-    resampled uniformly; one-sided or unbounded parameters are jittered
-    around theta0 and then clipped to whatever finite side does exist.
+    Re-run the SAME config `n_seeds` times with different MCMC seeds (chain
+    starting points and RNG streams; priors/bounds identical) and report how
+    much the fitted ROI / channel ranking moves. Seed 0 uses `mcmc_cfg`'s own
+    seed. Stable rankings across seeds mean the posterior is well explored;
+    movement means run longer / raise target_accept.
+
+    Returns dict: summary, per_seed_roi, per_seed_rank, seed_metrics,
+    tau_vs_baseline (same shapes as before).
     """
-    theta0 = np.asarray(theta0, dtype=float)
-    out = theta0.copy()
-    for i, (lo, hi) in enumerate(bounds):
-        v = theta0[i]
-        lo_fin = lo is not None and np.isfinite(lo)
-        hi_fin = hi is not None and np.isfinite(hi)
-        if lo_fin and hi_fin and hi > lo:
-            out[i] = rng.uniform(lo, hi)
-        else:
-            scale = max(abs(v), 1e-3) * jitter_frac
-            cand = v + rng.normal(0.0, scale)
-            if lo_fin:
-                cand = max(cand, lo)
-            if hi_fin:
-                cand = min(cand, hi)
-            out[i] = cand
-    return out
+    from modules.pipeline import run_multi_dependent_pipeline
+    from modules.mcmc import mcmc_cfg_with_defaults
 
-
-def run_seed_stability(df_full, config, max_iter, method, n_seeds=5,
-                        base_seed=0, ng_cfg=None, progress_cb=None):
-    """
-    Refit the SAME config `n_seeds` times, each time from a different
-    optimizer starting point (bounds — including the positivity/negativity
-    constraints — are identical every run; only theta0 moves), and report
-    how much the fitted ROI / channel ranking moves across runs. Seed 0
-    always uses the model's normal default starting point, so it matches
-    what Tab 6 / Tab 8 would produce.
-
-    A model whose ROI ranking is stable across seeds is one you can trust
-    more; a lot of movement means the likelihood surface is flat or
-    multi-modal for this config, and the point-estimate ROI numbers should
-    be read with real caution regardless of how good MAPE/R² look.
-
-    Returns a dict with:
-      "summary"        — one row per channel: ROI mean/std/min/max and
-                          mean/std of its rank across seeds.
-      "per_seed_roi"    — seeds x channels ROI pivot table.
-      "per_seed_rank"   — seeds x channels rank pivot table (1 = best ROI).
-      "seed_metrics"    — MAPE / R² / log-lik per seed.
-      "tau_vs_baseline" — Kendall's tau between each seed's full ranking
-                          and seed 0's ranking (1.0 = identical order).
-    """
-    from modules.pipeline import (
-        run_full_ekf_pipeline, run_multi_dependent_pipeline, _prep_joint,
-    )
-    from modules.params import _make_globals
-    from modules.bounds import _build_theta0_and_bounds
-
-    is_joint = bool(config.get("enable_second_dependent") and config.get("target2"))
-
-    if is_joint:
-        _, _, theta0_base, bounds, _, _ = _prep_joint(df_full, config)
-    else:
-        g = _make_globals(config)
-        n_train = config["n_train"]
-        df_train = df_full.iloc[:n_train].copy().reset_index(drop=True)
-        theta0_base, bounds = _build_theta0_and_bounds(df_train, g)
-
+    cfg0 = mcmc_cfg_with_defaults(mcmc_cfg)
     seed_rois, seed_metrics = [], []
     for s in range(n_seeds):
-        theta0_s = None
-        if s > 0:
-            rng = np.random.default_rng(base_seed + s)
-            theta0_s = _random_theta0(theta0_base, bounds, rng)
-
-        if is_joint:
-            res, _res2 = run_multi_dependent_pipeline(
-                df_full, config, max_iter, method, ng_cfg=ng_cfg,
-                theta0_joint_override=theta0_s,
-            )
-        else:
-            res = run_full_ekf_pipeline(
-                df_full, config, max_iter, method, ng_cfg=ng_cfg,
-                theta0_override=theta0_s,
-            )
-
-        roi = res["roi_df"][["Channel", "ROI"]].copy()
-        roi["seed"] = s
+        cfg = dict(cfg0); cfg["seed"] = cfg0["seed"] + (base_seed + s) * 1000 if s else cfg0["seed"]
+        res, _res2 = run_multi_dependent_pipeline(df_full, config, cfg)
+        roi = res["roi_df"][["Channel", "ROI"]].copy(); roi["seed"] = s
         seed_rois.append(roi)
         seed_metrics.append({"seed": s, "mape": res["mape"], "r2": res["r2"],
-                              "r2_gelman": res["r2_gelman"],
-                              "loglik": res["loglik"], "success": res["success"]})
+                              "r2_gelman": res["r2_gelman"], "loglik": res["loglik"],
+                              "success": res["success"]})
         if progress_cb:
             progress_cb(s + 1, n_seeds)
 
     all_roi = pd.concat(seed_rois, ignore_index=True)
     pivot = all_roi.pivot(index="seed", columns="Channel", values="ROI")
     rank_pivot = pivot.rank(axis=1, ascending=False, method="average")
-
-    roi_mean = pivot.mean(axis=0)
     summary = pd.DataFrame({
-        "Channel": pivot.columns,
-        "ROI_mean": roi_mean.values,
-        "ROI_std": pivot.std(axis=0).values,
-        "ROI_min": pivot.min(axis=0).values,
-        "ROI_max": pivot.max(axis=0).values,
-        "Rank_mean": rank_pivot.mean(axis=0).values,
+        "Channel": pivot.columns, "ROI_mean": pivot.mean(axis=0).values,
+        "ROI_std": pivot.std(axis=0).values, "ROI_min": pivot.min(axis=0).values,
+        "ROI_max": pivot.max(axis=0).values, "Rank_mean": rank_pivot.mean(axis=0).values,
         "Rank_std": rank_pivot.std(axis=0).values,
     })
     with np.errstate(divide="ignore", invalid="ignore"):
@@ -288,19 +214,12 @@ def run_seed_stability(df_full, config, max_iter, method, n_seeds=5,
     tau_rows = []
     if n_seeds > 1:
         from scipy.stats import kendalltau
-        baseline_rank = rank_pivot.iloc[0]
+        base = rank_pivot.iloc[0]
         for s in range(1, n_seeds):
-            tau, _ = kendalltau(baseline_rank.values, rank_pivot.iloc[s].values)
+            tau, _ = kendalltau(base.values, rank_pivot.iloc[s].values)
             tau_rows.append({"seed": s, "kendall_tau_vs_seed0": tau})
-    tau_df = pd.DataFrame(tau_rows)
-
-    return {
-        "summary": summary,
-        "per_seed_roi": pivot,
-        "per_seed_rank": rank_pivot,
-        "seed_metrics": pd.DataFrame(seed_metrics),
-        "tau_vs_baseline": tau_df,
-    }
+    return {"summary": summary, "per_seed_roi": pivot, "per_seed_rank": rank_pivot,
+            "seed_metrics": pd.DataFrame(seed_metrics), "tau_vs_baseline": pd.DataFrame(tau_rows)}
 
 
 # ─────────────────────────────────────────────────────────────────────────
@@ -311,7 +230,7 @@ def compute_vif(df_full, g, columns=None):
     """
     Variance Inflation Factor for each predictor actually fed to the
     model's observation/state equations — RAW spend/impressions/price
-    series, not adstocked (see modules/kalman.py module docstring for why
+    series, not adstocked (see modules/statespace.py module docstring for why
     the model itself always uses raw regressors: carryover lives in the
     state's own persistence, not in a pre-decayed observation series).
 

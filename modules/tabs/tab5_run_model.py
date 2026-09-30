@@ -1,6 +1,5 @@
 """
-Tab 6 — Run RBE Model: optimizer selection (L-BFGS-B / SLSQP / Nevergrad)
-and kicking off the full pipeline.
+Tab 6 — Run RBE Model: MCMC (NUTS) settings and kicking off the full pipeline.
 """
 
 import streamlit as st
@@ -9,7 +8,7 @@ from modules.ui_helpers import section, info, ng_info, prophet_info, need_data, 
 from modules.pipeline import run_multi_dependent_pipeline, run_chained_dependent_pipeline
 
 
-def render_tab5(nevergrad_available: bool):
+def render_tab5(nevergrad_available: bool = False):
     section("05", "Run RBE Model")
     if st.session_state.df is None:     need_data()
     if st.session_state.config is None: need_config()
@@ -77,14 +76,14 @@ def render_tab5(nevergrad_available: bool):
                 f"**on its own first**, then its "
                 f"{'fitted' if config.get('chain_use_fitted', True) else 'raw actual'} values "
                 f"will be added as a new **{config.get('chain_driver_role','non_media').replace('_',' ')}** "
-                f"predictor driving Dependent 1 (`{config['target']}`) — two separate optimizer "
+                f"predictor driving Dependent 1 (`{config['target']}`) — two separate MCMC "
                 f"runs, connected only through that one new column."
             )
         else:
             st.info(
                 f"➕ **Joint (bivariate) mode**: Dependent 1 (`{config['target']}`) and "
                 f"Dependent 2 (`{config['target2']}`) will be fitted **together** in a "
-                f"single bivariate Kalman filter — one optimizer run over both equations' "
+                f"single bivariate state-space posterior — one MCMC run over both equations' "
                 f"parameters plus the correlation (ρ) between their errors, rather than "
                 f"two separate independent fits."
             )
@@ -97,51 +96,44 @@ def render_tab5(nevergrad_available: bool):
             )
 
     st.divider()
-    st.markdown("### Optimizer Selection")
-    OPTIMIZER_OPTIONS = ["L-BFGS-B", "SLSQP"]
-    if nevergrad_available: OPTIMIZER_OPTIONS.append("Nevergrad")
-    method = st.selectbox("Optimizer", OPTIMIZER_OPTIONS,
-                           help="L-BFGS-B/SLSQP: gradient-based. "
-                                "Nevergrad: derivative-free multi-objective.")
-
-    ng_cfg = None
-    if method == "Nevergrad":
-        if not nevergrad_available:
-            st.error("Nevergrad not installed. Run `pip install nevergrad`."); st.stop()
-        ng_info(
-            "🟣 <b>Nevergrad Optimizer</b><br>"
-            "Loss = <code>−loglik</code> — same objective as L-BFGS-B / SLSQP, "
-            "just optimised with a derivative-free search strategy instead of a gradient-based one."
-        )
-        ng_col1, ng_col2 = st.columns(2)
-        with ng_col1:
-            ng_strategy = st.selectbox("Strategy",
-                ["TwoPointsDE","NGOpt","CMA","PSO","DE","OnePlusOne","RandomSearch","MetaModel"])
-            ng_budget   = st.number_input("Budget (evaluations)", 100, 10000, 500, 50)
-        with ng_col2:
-            ng_workers  = st.number_input("Parallel workers", 1, 8, 1, 1)
-            max_iter    = ng_budget
-
-        ng_cfg = {
-            "strategy": ng_strategy, "budget": int(ng_budget), "num_workers": int(ng_workers),
-        }
-    else:
-        col1, _ = st.columns(2)
-        with col1: max_iter = st.number_input("Max iterations", 100, 5000, 800, 100)
+    st.markdown("### MCMC Settings (NUTS)")
+    ng_info(
+        "🟣 <b>MCMC / NUTS</b><br>"
+        "Parameters <i>and</i> the full latent state path are sampled from their joint posterior "
+        "(same state-space equations as before). Holdout rows are true forecasts — the holdout target "
+        "is never seen. Fewer draws = faster; check R-hat / divergences below before trusting a fit."
+    )
+    m1, m2, m3 = st.columns(3)
+    with m1:
+        num_warmup = st.number_input("Warm-up iterations / chain", 100, 5000, 500, 100)
+        num_chains = st.number_input("Chains", 1, 4, 2, 1,
+                                     help="≥2 needed for R-hat. Chains run in parallel on separate CPU devices.")
+    with m2:
+        num_samples = st.number_input("Kept draws / chain", 100, 5000, 500, 100)
+        target_accept = st.slider("Target accept", 0.80, 0.99, 0.90, 0.01,
+                                  help="Raise toward 0.95–0.99 if divergences appear (slower, safer).")
+    with m3:
+        seed = st.number_input("Random seed", 0, 10**6, 0, 1)
+        max_tree_depth = st.number_input("Max tree depth", 5, 12, 8, 1)
+    mcmc_cfg = {"num_warmup": int(num_warmup), "num_samples": int(num_samples),
+                "num_chains": int(num_chains), "target_accept": float(target_accept),
+                "seed": int(seed), "max_tree_depth": int(max_tree_depth)}
 
     if st.button("🚀 Run RBE MMM", type="primary", use_container_width=True):
         joint_active = bool(config.get("enable_second_dependent") and config.get("target2"))
         chained_mode = joint_active and dep_relationship == "chained"
         spinner_text = (
-            "Running chained two-stage RBE optimisation… (60–600 s)" if chained_mode else
-            "Running joint bivariate RBE optimisation… (60–600 s)" if joint_active else
-            "Running RBE optimisation… (30–300 s)"
+            "Running chained two-stage MCMC… (minutes)" if chained_mode else
+            "Running joint bivariate MCMC… (minutes)" if joint_active else
+            "Running MCMC… (minutes)"
         )
+        prog = st.progress(0.0, text="Starting …")
+        _cb = lambda f, t: prog.progress(float(min(max(f, 0.0), 1.0)), text=t)
         with st.spinner(spinner_text):
             try:
                 if chained_mode:
                     results_1, results_2, df_with_driver, driver_col = \
-                        run_chained_dependent_pipeline(df, config, max_iter, method, ng_cfg=ng_cfg)
+                        run_chained_dependent_pipeline(df, config, mcmc_cfg, progress_cb=_cb)
                     # Persist the new driver column into the working dataset — same
                     # pattern Tab 2 uses for prophet columns — so every downstream
                     # tab (Results, Refine & Refit, exports) sees it automatically.
@@ -173,21 +165,29 @@ def render_tab5(nevergrad_available: bool):
                         config = new_config
                 else:
                     results_1, results_2 = run_multi_dependent_pipeline(
-                        df, config, max_iter, method, ng_cfg=ng_cfg)
+                        df, config, mcmc_cfg, progress_cb=_cb)
                 st.session_state.model_results   = results_1
                 st.session_state.model_fitted    = True
                 st.session_state.model_results_2 = results_2
                 st.session_state.model_fitted_2  = results_2 is not None
 
+                prog.empty()
                 st.success("✅ Model fitted!")
+                _dg = results_1["mcmc"]
+                if _dg["converged"]:
+                    st.caption(f"MCMC: max R-hat {_dg['max_rhat']:.3f} · min ESS {_dg['min_ess']:.0f} · 0 divergences ✅")
+                else:
+                    st.warning(f"MCMC diagnostics need attention — max R-hat {_dg['max_rhat']:.3f}, "
+                               f"{_dg['divergences']} divergence(s), min ESS {_dg['min_ess']:.0f}. "
+                               "Try more warm-up/draws or a higher target accept.")
                 st.markdown(f"#### Dependent 1 · `{config['target']}`")
                 c1, c2, c3, c4, c5, c6 = st.columns(6)
                 c1.metric("MAPE",       f"{results_1['mape']:.2%}")
                 c2.metric("Train MAPE", f"{results_1['mape_in']:.2%}")
                 c3.metric("Test MAPE",  f"{results_1['mape_out']:.2%}")
                 c4.metric("Gelman R²",  f"{results_1['r2_gelman']:.4f}")
-                c5.metric("Log-Lik",    f"{results_1['loglik']:.1f}")
-                c6.metric("Converged",  "Yes ✅" if results_1["success"] else "Partial ⚠️")
+                c5.metric("Post. mean log-lik", f"{results_1['loglik']:.1f}")
+                c6.metric("Diagnostics OK", "Yes ✅" if results_1["success"] else "Check ⚠️")
                 with st.expander("📊 R² metrics"):
                     st.metric("R²", f"{results_1['r2']:.4f}")
 
@@ -198,8 +198,8 @@ def render_tab5(nevergrad_available: bool):
                     d2.metric("Train MAPE", f"{results_2['mape_in']:.2%}")
                     d3.metric("Test MAPE",  f"{results_2['mape_out']:.2%}")
                     d4.metric("Gelman R²",  f"{results_2['r2_gelman']:.4f}")
-                    d5.metric("Log-Lik",    f"{results_2['loglik']:.1f}")
-                    d6.metric("Converged",  "Yes ✅" if results_2["success"] else "Partial ⚠️")
+                    d5.metric("Post. mean log-lik",    f"{results_2['loglik']:.1f}")
+                    d6.metric("Diagnostics OK",  "Yes ✅" if results_2["success"] else "Check ⚠️")
                     with st.expander("📊 R² metrics"):
                         st.metric("R²", f"{results_2['r2']:.4f}")
                     st.info(
@@ -217,8 +217,8 @@ def render_tab5(nevergrad_available: bool):
                     d2.metric("Train MAPE", f"{results_2['mape_in']:.2%}")
                     d3.metric("Test MAPE",  f"{results_2['mape_out']:.2%}")
                     d4.metric("Gelman R²",  f"{results_2['r2_gelman']:.4f}")
-                    d5.metric("Log-Lik",    f"{results_2['loglik']:.1f}")
-                    d6.metric("Converged",  "Yes ✅" if results_2["success"] else "Partial ⚠️")
+                    d5.metric("Post. mean log-lik",    f"{results_2['loglik']:.1f}")
+                    d6.metric("Diagnostics OK",  "Yes ✅" if results_2["success"] else "Check ⚠️")
                     with st.expander("📊 R² metrics"):
                         st.metric("R²", f"{results_2['r2']:.4f}")
                     _coupling_mode_2 = results_2.get("cross_intercept_coupling_mode", "both")
@@ -262,10 +262,19 @@ def render_tab5(nevergrad_available: bool):
         c1, c2, c3 = st.columns(3)
         c1.metric("MAPE", f"{res['mape']:.2%}")
         c2.metric("Gelman R²", f"{res['r2_gelman']:.4f}")
-        c3.metric("Log-Lik", f"{res['loglik']:.2f}")
+        c3.metric("Post. mean log-lik", f"{res['loglik']:.2f}")
         with st.expander("📊 R² metrics"):
             st.metric("R²", f"{res['r2']:.4f}")
         _show_train_test(res, "dep1")
+        _m = res.get("mcmc")
+        if _m:
+            with st.expander("🔬 MCMC diagnostics & posterior summary"):
+                k1, k2, k3, k4 = st.columns(4)
+                k1.metric("Max R-hat", f"{_m['max_rhat']:.3f}")
+                k2.metric("Min ESS", f"{_m['min_ess']:.0f}")
+                k3.metric("Divergences", f"{_m['divergences']}")
+                k4.metric("Runtime", f"{_m['diagnostics']['runtime_s']:.0f}s")
+                st.dataframe(_m["summary"].round(5), use_container_width=True, hide_index=True)
 
         if st.session_state.get("model_fitted_2") and st.session_state.get("model_results_2"):
             res2 = st.session_state.model_results_2
@@ -274,7 +283,7 @@ def render_tab5(nevergrad_available: bool):
             e1, e2, e3 = st.columns(3)
             e1.metric("MAPE", f"{res2['mape']:.2%}")
             e2.metric("Gelman R²", f"{res2['r2_gelman']:.4f}")
-            e3.metric("Log-Lik", f"{res2['loglik']:.2f}")
+            e3.metric("Post. mean log-lik", f"{res2['loglik']:.2f}")
             with st.expander("📊 R² metrics"):
                 st.metric("R²", f"{res2['r2']:.4f}")
             _show_train_test(res2, "dep2")
@@ -291,77 +300,9 @@ def render_tab5(nevergrad_available: bool):
                            f"[coupling: {_coupling_note_disp}] · "
                            f"joint log-lik = {res2['joint_loglik']:.2f}")
 
-                # ── Joint objective formula + numeric breakdown ──────────
-                # Loss(Θ) = EKF NLL + λ·NRMSE regularization (see
-                # modules/kalman.py::joint_composite_loss). Lives in this
-                # PERSISTENT block (not the transient button-press one
-                # above it) so it stays visible across reruns, same as
-                # every other metric on this page.
-                loss_mode_disp = res2.get("loss_function_mode", "nll_nrmse")
-                st.markdown("##### Joint objective being optimized")
-                if loss_mode_disp == "nll_only":
-                    st.latex(
-                        r"""
-                        \text{Loss}(\Theta) = \underbrace{\frac{1}{2}\sum_{t=1}^{T}
-                        \Big(\log|\mathbf{F}_t| + \mathbf{v}_t^{T}\mathbf{F}_t^{-1}\mathbf{v}_t\Big)}
-                        _{\text{EKF Negative Log-Likelihood (NLL)}}
-                        """
-                    )
-                    st.caption(
-                        "**EKF NLL only** was selected on Tab 4 — the NRMSE term below "
-                        "is shown as a diagnostic but was NOT part of the optimizer's "
-                        "objective (λ = 0)."
-                    )
-                else:
-                    st.latex(
-                        r"""
-                        \text{Loss}(\Theta) = \underbrace{\frac{1}{2}\sum_{t=1}^{T}
-                        \Big(\log|\mathbf{F}_t| + \mathbf{v}_t^{T}\mathbf{F}_t^{-1}\mathbf{v}_t\Big)}
-                        _{\text{EKF Negative Log-Likelihood (NLL)}}
-                        \;+\; \lambda\underbrace{\left(\frac{\text{RMSE}_{\text{dep1}}}{\bar y_{\text{dep1}}}
-                        + \frac{\text{RMSE}_{\text{dep2}}}{\bar y_{\text{dep2}}}\right)}
-                        _{\text{NRMSE Regularization}}
-                        """
-                    )
-                with st.expander("📐 Loss breakdown for this fit"):
-                    lam    = res2.get("lambda_reg")
-                    nrmse  = res2.get("nrmse_reg")
-                    rmse_1 = res2.get("rmse_dep1")
-                    rmse_2 = res2.get("rmse_dep2")
-                    nll    = -res2.get("joint_loglik", 0.0)
-
-                    if lam is not None:
-                        b1, b2, b3 = st.columns(3)
-                        b1.metric("NLL term", f"{nll:.2f}")
-                        b2.metric("λ (auto-scaled)" if loss_mode_disp != "nll_only" else "λ (forced)",
-                                  f"{lam:.4g}")
-                        b3.metric("NRMSE term (λ·NRMSE)", f"{lam * nrmse:.2f}")
-
-                        b4, b5 = st.columns(2)
-                        b4.metric(f"RMSE · {config['target']}", f"{rmse_1:.4g}")
-                        b5.metric(f"RMSE · {config.get('target2')}", f"{rmse_2:.4g}")
-
-                        if loss_mode_disp == "nll_only":
-                            st.caption(
-                                "λ is forced to 0 — the NLL term alone drove the fit. "
-                                "NRMSE/RMSE above are evaluated on the **full** dataset "
-                                "with the final fitted parameters, purely as diagnostics."
-                            )
-                        else:
-                            st.caption(
-                                "λ was fixed once at θ₀ (the optimizer's starting point) so the "
-                                "NLL and NRMSE terms contribute comparably to the loss at the "
-                                "start of the search — it is NOT re-estimated every iteration. "
-                                "NLL and NRMSE above are both evaluated on the **full** dataset "
-                                "with the final fitted parameters (train+test), for diagnostics; "
-                                "the optimizer itself only ever saw the train-window version "
-                                "of this loss."
-                            )
-                    else:
-                        st.caption(
-                            "Regularization diagnostics not found on this result — "
-                            "re-run the model to populate them."
-                        )
+                st.caption("Objective: joint posterior over both equations' parameters and latent state paths "
+                           "(bivariate-Gaussian likelihood on the training rows × priors). "
+                           f"RMSE (full data): {res2['rmse_dep1']:.4g} / {res2['rmse_dep2']:.4g}.")
             elif res2.get("chained_into_dep1") and st.session_state.model_results.get("chain_driver_col"):
                 st.caption(
                     f"➡️ Feeds Dependent 1 as `{st.session_state.model_results['chain_driver_col']}` "

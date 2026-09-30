@@ -45,7 +45,7 @@ def _make_globals(cfg: dict):
     }
     # Ordered list of channels (across all eligible groups) using Weibull —
     # this fixed order is what the flat theta vector's adstock-shape/scale
-    # block is built from (see modules/bounds.py, modules/kalman.py).
+    # block is built from (see modules/bounds.py, modules/statespace.py).
     g["ADSTOCK_WEIBULL_COLS"] = [
         col for col in _adstock_eligible if g["ADSTOCK_MAP"].get(col) == "weibull"
     ]
@@ -68,7 +68,7 @@ def _make_globals(cfg: dict):
     # diminishing-returns curve). "hill": media_k,t^n_k_intercept /
     # (media_k,t^n_k_intercept + S_k_intercept^n_k_intercept) (bounded 0-1
     # S-curve with its own half-saturation S_k_intercept per effector).
-    # See modules/kalman.py module docstring for both full equations.
+    # See modules/statespace.py module docstring for both full equations.
     g["INTERCEPT_TRANSFORM_TYPE"] = cfg.get("intercept_transform_type", "power")  # "power" | "hill"
 
     # INTERCEPT_DYNAMICS_TYPE: independent of INTERCEPT_TRANSFORM_TYPE above —
@@ -86,7 +86,7 @@ def _make_globals(cfg: dict):
     # CROSS_INTERCEPT_COUPLING_MODE: only relevant for the 2-dependent JOINT
     # (bivariate) fit, and only when INTERCEPT_DYNAMICS_TYPE is "carryover"
     # on both equations (the coupling is itself a carryover mechanism — see
-    # modules/kalman.py module docstring's "Cross-intercept coupling"
+    # modules/statespace.py module docstring's "Cross-intercept coupling"
     # section). Controls which of the two off-diagonal phi_1/phi_2 terms
     # are actually estimated (the other is pinned at exactly 0):
     #   "both"          — phi_1 AND phi_2 both estimated (original,
@@ -132,14 +132,14 @@ def _make_globals(cfg: dict):
     # INTERCEPT_NOISE_SCALE: how much the intercept is allowed to drift
     # period-to-period (as a fraction of the target's average value,
     # 1-std per step). Set to 0 to fall back to the old, nearly-frozen
-    # behaviour. See modules/kalman.py::_build_process_noise.
+    # behaviour. See modules/statespace.py::_build_process_noise.
     g["MIN_BASE_FRACTION"]     = float(cfg.get("min_base_fraction", 0.03))
     g["INTERCEPT_NOISE_SCALE"] = float(cfg.get("intercept_noise_scale", 0.02))
     # BETA_NOISE_SCALE: same idea as INTERCEPT_NOISE_SCALE, but for every
     # channel beta (media/comp-media/non-media/comp-non-media/price). Lets
     # each beta drift period-to-period instead of being locked into pure
     # Ls-driven geometric decay whenever its forcing term weakens. See
-    # modules/kalman.py::_build_process_noise.
+    # modules/statespace.py::_build_process_noise.
     g["BETA_NOISE_SCALE"]      = float(cfg.get("beta_noise_scale", 0.02))
 
     g["N_MEDIA"]         = len(g["MEDIA_COLS"])
@@ -183,7 +183,7 @@ def unpack_theta(theta, g: dict):
     # ── Intercept dynamics: G0 (carryover) XOR I0 (simple regression) ──
     # Exactly one of the two occupies a theta slot here, mirroring the
     # USE_ORGANIC_DRIFT/mu variable-length pattern below. See
-    # modules/params.py::_make_globals and modules/kalman.py module
+    # modules/params.py::_make_globals and modules/statespace.py module
     # docstring for the two equations this switches between.
     if INTERCEPT_DYNAMICS_TYPE == "simple":
         G0 = 0.0

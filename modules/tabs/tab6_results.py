@@ -467,7 +467,7 @@ def render_full_results(df, config, res, target, key_prefix="", pcb_key="per_cha
     c1, c2, c3, c4 = st.columns(4)
     c1.metric("MAPE",         f"{res['mape']:.2%}")
     c2.metric("Gelman R²",    f"{res['r2_gelman']:.4f}")
-    c3.metric("Log-Lik",      f"{res['loglik']:.2f}")
+    c3.metric("Post. mean log-lik",      f"{res['loglik']:.2f}")
     c4.metric("Observations", len(df))
     with st.expander("📊 R² metrics"):
         st.metric("R²", f"{res['r2']:.4f}")
@@ -979,7 +979,7 @@ def render_tab6():
                 "none": "off",
             }.get(_coupling_mode_t6, _coupling_mode_t6)
             st.caption(
-                f"🔗 Jointly fitted with a bivariate Kalman filter · "
+                f"🔗 Jointly fitted with a bivariate state-space posterior · "
                 f"ρ(Dep1, Dep2) = **{res['rho_y']:.3f}** · "
                 f"φ₁ (Dep2→Dep1 intercept) = **{res['phi1']:.3f}** · "
                 f"φ₂ (Dep1→Dep2 intercept) = **{res['phi2']:.3f}** "

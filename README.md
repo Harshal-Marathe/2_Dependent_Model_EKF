@@ -1,4 +1,4 @@
-# Rainbrain 2 v8 — RBE Marketing Mix Modeling Platform
+# Rainbrain 2 v8 — MMM Platform (MCMC core)
 
 Modularized version of the original single-file Streamlit app.
 
@@ -16,10 +16,11 @@ rainbrain_app/
     ├── ui_helpers.py             # section()/info()/safe_multiselect() etc.
     ├── transforms.py             # Hill saturation + adstock functions
     ├── params.py                 # _make_globals() / unpack_theta()
-    ├── kalman.py                  # RBE forward filter + RTS smoother
+    ├── statespace.py              # State-space equations: obs matrix, process noise, adstock
+    ├── mcmc.py                    # NUTS core: JAX equations, priors, sampler, posterior summaries
+    ├── layout.py                  # Flat theta layout (shared by refit + priors)
     ├── bounds.py                  # theta0 + per-channel bounds builder
-    ├── optimizer.py               # Nevergrad multi-objective optimizer
-    ├── pipeline.py                 # run_full_ekf_pipeline() — ties it all together
+    ├── pipeline.py                 # run_full_pipeline() / joint / chained — ties it all together
     └── tabs/
         ├── tab1_data_upload.py
         ├── tab2_prophet.py
@@ -36,10 +37,16 @@ pip install -r requirements.txt
 streamlit run app.py
 ```
 
-Prophet and Nevergrad are optional — the app detects their availability
-at import time (`modules/dependencies.py`) and degrades gracefully
-(Tab 2 / the Nevergrad optimizer option are disabled with a clear
-message if not installed).
+Prophet is optional (Tab 2 is disabled with a message if missing).
+JAX + NumPyro are required for fitting.
+
+## What changed in the core
+
+Same state-space equations; the Kalman filter, RTS smoother and the
+L-BFGS-B/SLSQP/Nevergrad optimizers were replaced by NUTS. Parameters and
+the whole latent state path are sampled jointly. Holdout rows are true
+forecasts (holdout target never enters the likelihood). Results carry
+R-hat / ESS / divergences and 95% credible bands from posterior draws.
 
 ## Key fix preserved from the original file
 

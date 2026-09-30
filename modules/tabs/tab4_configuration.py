@@ -84,13 +84,13 @@ def render_tab4():
         "the same regressors x_t (media, non-media, price, competitor) and the "
         "same adstock/transformation family, but each keeps its own betas. "
         "Unlike two separate models, Dependent 1 and Dependent 2 are fitted "
-        "<b>jointly</b> with a single bivariate Kalman filter: one optimizer run "
+        "<b>jointly</b> with a single bivariate MCMC posterior: one sampling run "
         "estimates both equations' parameters together with the correlation "
         "between their errors, so a surprise in one KPI at time t also informs "
         "the state update of the other KPI at that same t."
     )
     enable_second_dependent = st.checkbox(
-        "➕ Enable a second dependent variable (jointly fitted, bivariate Kalman filter)",
+        "➕ Enable a second dependent variable (jointly fitted, bivariate MCMC posterior)",
         key="cfg_enable_target2",
     )
     target2 = None
@@ -108,7 +108,7 @@ def render_tab4():
                 f"non-media · {len(price_vars)} price · {len(comp_media)} comp-media · "
                 f"{len(comp_nonmedia)} comp-non-media, and the same adstock/transform "
                 f"choices set in Section D below. Dependent 1 and Dependent 2 will be "
-                f"fitted **jointly** in Tab 6 with a bivariate Kalman filter "
+                f"fitted **jointly** in Tab 6 with a bivariate MCMC posterior "
                 f"(shared time index, correlated errors) — not as two separate models."
             )
         else:
@@ -225,7 +225,7 @@ def render_tab4():
         relationship_choice = st.radio(
             "How should the two dependents be linked?",
             [
-                "🔗 Joint — fitted together in one bivariate Kalman filter (correlated errors, cross-intercept coupling)",
+                "🔗 Joint — fitted together in one bivariate MCMC posterior (correlated errors, cross-intercept coupling)",
                 "➡️ Chained — Dependent 2 is fitted on its own first, then its fitted values become an X-driver inside Dependent 1's equation",
             ],
             key="cfg_dep_relationship_mode",
@@ -632,9 +632,9 @@ def render_tab4():
     # ── D1. Cross-intercept coupling direction (2-dependent joint fit only) ──
 
     # Only meaningful when a second dependent is configured, the two are
-    # linked in "joint" (bivariate Kalman filter) mode, and BOTH intercepts
+    # linked in "joint" (bivariate MCMC posterior) mode, and BOTH intercepts
     # are on "carryover" dynamics — coupling is itself a carryover mechanism
-    # (see modules/kalman.py module docstring), so it's a no-op if either
+    # (see modules/statespace.py module docstring), so it's a no-op if either
     # equation has been switched to a simple/constant-baseline regression.
     cross_intercept_coupling_mode_str = "both"
     if enable_second_dependent and target2 and dependent_relationship == "joint":
@@ -689,46 +689,14 @@ def render_tab4():
             else:
                 cross_intercept_coupling_mode_str = "none"
 
-    # ── D2. Loss function (2-dependent joint fit only) ───────────────────
-    # Only meaningful for the JOINT bivariate fit — the NRMSE regularization
-    # term is defined over both dependents' residuals at once (see
-    # modules/kalman.py::joint_composite_loss), so it doesn't apply to a
-    # single-dependent fit or to the chained/mediation pipeline.
-    loss_function_mode_str = "nll_nrmse"
+    # ── D2. Objective ───────────────────────────────────────────────────
+    # MCMC samples the posterior (likelihood x priors); there is no loss to
+    # choose and no NRMSE penalty. The key is kept in the saved config only
+    # so older workspaces keep loading.
+    loss_function_mode_str = "nll_only"
     if enable_second_dependent and target2 and dependent_relationship == "joint":
-        st.markdown("#### Loss Function")
-        loss_choice = st.radio(
-            "Objective optimized during fitting",
-            [
-                "🎯 EKF NLL + λ·NRMSE Regularization (default)",
-                "📐 EKF NLL only",
-            ],
-            horizontal=False,
-            key="loss_function_mode_radio",
-            help=(
-                "Loss(Θ) = ½·Σₜ(log|Fₜ| + vₜᵀFₜ⁻¹vₜ) + λ·(RMSE_dep1/ȳ_dep1 + "
-                "RMSE_dep2/ȳ_dep2)\n\n"
-                "**EKF NLL + λ·NRMSE Regularization**: the bivariate Kalman "
-                "negative log-likelihood plus an NRMSE penalty term. λ is "
-                "auto-scaled once at the starting point so the two terms "
-                "contribute roughly 50/50 to the loss — this pulls the fit "
-                "toward lower prediction error on top of maximizing "
-                "likelihood, and is the default/original behaviour.\n\n"
-                "**EKF NLL only**: pure bivariate EKF negative "
-                "log-likelihood — λ is forced to 0, so the NRMSE term "
-                "never enters the optimizer's objective. NRMSE is still "
-                "computed and shown in Results as a diagnostic either way."
-            ),
-        )
-        loss_function_mode_str = (
-            "nll_nrmse" if loss_choice.startswith("🎯") else "nll_only"
-        )
-        st.caption(
-            "**Active objective:** "
-            + ("Loss(Θ) = NLL(Θ) + λ·NRMSE(Θ), λ auto-scaled at θ₀"
-               if loss_function_mode_str == "nll_nrmse"
-               else "Loss(Θ) = NLL(Θ)  *(λ forced to 0 — NRMSE not optimized)*")
-        )
+        st.caption("**Inference:** joint MCMC (NUTS) posterior over both equations — "
+                   "no loss function or NRMSE penalty to choose.")
 
     # Summary box showing the active state equation. Adstock is now chosen
     # PER CHANNEL (adstock_map above) — the transform (Hill/Power) is still
@@ -1081,13 +1049,7 @@ def render_tab4():
                     st.success(
                         f"➕ Second dependent variable enabled: **{target2}** — will be "
                         f"fitted **jointly** with **{target}** in Tab 6 using a bivariate "
-                        f"Kalman filter (shared predictors x_t, correlated errors)."
-                    )
-                    st.caption(
-                        "**Loss function:** "
-                        + ("EKF NLL + λ·NRMSE Regularization"
-                           if loss_function_mode_str == "nll_nrmse"
-                           else "EKF NLL only")
+                        f"MCMC posterior (shared predictors x_t, correlated errors)."
                     )
                 if different_predictors_2:
                     st.info(
