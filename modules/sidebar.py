@@ -1,17 +1,26 @@
 """
 Sidebar: branding, dependency status, step checklist, prophet column log.
 """
-
+ 
+import os
+ 
 import streamlit as st
-
+ 
 from modules.persistence import build_workspace_bytes, restore_workspace
-
-
+ 
+ 
 def render_sidebar(nevergrad_available: bool):
     with st.sidebar:
         st.markdown("## 📡 2 dependent model")
         st.markdown("**Recursive Bayesian Estimation**  \nMarketing Mix Modeling")
-        st.caption("Core: MCMC (NUTS) · build 4 · band-column filter on")
+        st.caption("Core: MCMC (NUTS) · build 5 · coefficient-based Short-Term table")
+        # Which copy of the code is actually running? (paths differ if you edit one
+        # folder but Streamlit is serving another - e.g. an old clone or Codespace)
+        _mod_dir = os.path.dirname(os.path.abspath(__file__))
+        _t6 = os.path.join(_mod_dir, "tabs", "tab6_results.py")
+        _new = os.path.exists(os.path.join(_mod_dir, "contrib_tables.py"))
+        st.caption(f"📁 Running from: {os.path.dirname(_mod_dir)}  \n"
+                   f"contrib_tables.py present: {'yes ✅' if _new else 'NO ❌ (old code)'}")
         
         st.divider()
         steps = {
@@ -24,13 +33,13 @@ def render_sidebar(nevergrad_available: bool):
         }
         for label, done in steps.items():
             st.markdown(f"`{'✅' if done else '○'}` {label}")
-
+ 
         if st.session_state.prophet_cols_added:
             st.divider()
             st.caption("📌 Prophet cols in dataset:")
             for pc in st.session_state.prophet_cols_added:
                 st.caption(f"  • {pc}")
-
+ 
         st.divider()
         with st.expander("💾 Save / Load Model", expanded=False):
             st.caption(
@@ -57,7 +66,7 @@ def render_sidebar(nevergrad_available: bool):
                         "application/octet-stream",
                         use_container_width=True, key="sidebar_dl_workspace",
                     )
-
+ 
             st.markdown("---")
             uploaded_ws = st.file_uploader(
                 "⬆️ Load a saved model", type=["rbe", "pkl"],
@@ -76,11 +85,12 @@ def render_sidebar(nevergrad_available: bool):
                         st.rerun()
                     else:
                         st.session_state["_load_workspace_msg"] = ("error", msg)
-
+ 
             load_msg = st.session_state.pop("_load_workspace_msg", None)
             if load_msg:
                 kind, msg = load_msg
                 (st.success if kind == "success" else st.error)(msg)
-
+ 
         st.divider()
         st.caption("Complete steps 1 → 5 in order.")
+ 
