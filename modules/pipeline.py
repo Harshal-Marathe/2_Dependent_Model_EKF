@@ -28,6 +28,7 @@ from modules.kalman import (
 )
 from modules.transforms import apply_transformation, hill_transform_vec
 from modules.metrics import safe_mape
+from modules.cochrane_orcutt import run_cochrane_orcutt
 
 
 # ── Shared post-processing (contributions / ROI / parameter tables) ─────────
@@ -346,6 +347,10 @@ def _postprocess_equation(df_full, g, params, x_smooth, adstocked_media,
     else:
         param_rows.append({"Category":"Global","Variable":"Intercept","Parameter":"G0",     "Value":params["G0"]})
     param_rows.append({"Category":"Global","Variable":"Noise",    "Parameter":"sigma_y","Value":params["sigma_y"]})
+    if g.get("USE_COCHRANE_ORCUTT"):
+        # AR(1) coefficient of this equation's observation errors, as
+        # converged by the Cochrane-Orcutt loop (modules/cochrane_orcutt.py).
+        param_rows.append({"Category":"Global","Variable":"Cochrane-Orcutt","Parameter":"rho_AR1","Value":g.get("CO_RHO", 0.0)})
     if g["USE_ORGANIC_DRIFT"]:
         param_rows.append({"Category":"Global","Variable":"Organic drift","Parameter":"mu","Value":params["mu"]})
 
@@ -380,11 +385,13 @@ def run_full_ekf_pipeline(df_full, config, max_iter, method, ng_cfg=None):
     # on every single candidate evaluation.
     static_cache_train = build_static_cache(df_train, g)
 
-    if method == "Nevergrad" and NEVERGRAD_AVAILABLE and ng_cfg:
-        best_theta, _ = run_nevergrad_optimizer(df_train, g, theta0, bounds, ng_cfg,
-                                                  static_cache=static_cache_train)
-        opt_success = True; opt_nit = ng_cfg.get("budget", 500)
-    else:
+    def _fit(theta_start):
+        """One full optimizer run (at whatever g["CO_RHO"] currently is).
+        Returns (best_theta, success, n_iterations)."""
+        if method == "Nevergrad" and NEVERGRAD_AVAILABLE and ng_cfg:
+            best, _ = run_nevergrad_optimizer(df_train, g, theta_start, bounds, ng_cfg,
+                                               static_cache=static_cache_train)
+            return best, True, ng_cfg.get("budget", 500)
         # See modules/bounds.py::build_normalized_problem for why this
         # normalization matters: without it, L-BFGS-B/SLSQP's single
         # scalar finite-difference `eps` applied across theta's wildly
@@ -392,7 +399,7 @@ def run_full_ekf_pipeline(df_full, config, max_iter, method, ng_cfg=None):
         # leaves small-range parameters like `n` stuck exactly at their
         # init value — their true gradient signal is below the numerical
         # noise floor of the Kalman recursion at the default step size.
-        theta0_norm, norm_bounds, unscale = build_normalized_problem(theta0, bounds)
+        theta0_norm, norm_bounds, unscale = build_normalized_problem(theta_start, bounds)
 
         def objective(theta_norm):
             theta = unscale(theta_norm)
@@ -403,7 +410,33 @@ def run_full_ekf_pipeline(df_full, config, max_iter, method, ng_cfg=None):
         opt = minimize(objective, theta0_norm, method=method,
                        bounds=norm_bounds,
                        options={"maxiter": max_iter, "ftol": 1e-9, "eps": 1e-6})
-        best_theta = unscale(opt.x); opt_success = opt.success; opt_nit = opt.nit
+        return unscale(opt.x), opt.success, opt.nit
+
+    co_info = None
+    if g["USE_COCHRANE_ORCUTT"]:
+        # Optional Cochrane-Orcutt loop (modules/cochrane_orcutt.py): fit ->
+        # estimate AR(1) rho from the train residuals -> refit with the
+        # quasi-differenced update -> repeat until rho stops moving.
+        fit_state = {"success": True, "nit": 0}
+
+        def fit_fn(rhos, theta_init):
+            g["CO_RHO"] = rhos[0]
+            th, ok, nit = _fit(theta0 if theta_init is None else theta_init)
+            fit_state["success"] = ok; fit_state["nit"] += nit
+            return th
+
+        def resid_fn(theta, rhos):
+            g["CO_RHO"] = rhos[0]
+            p = unpack_theta(theta, g)
+            _, resid, *_ = run_kalman_filter(df_train, p, g, static_cache=static_cache_train)
+            return [resid[1:]]   # drop t=0: it only reflects the initial-state guess
+
+        best_theta, rhos, co_info = run_cochrane_orcutt(
+            fit_fn, resid_fn, 1, g["CO_MAX_ITER"], g["CO_TOL"])
+        g["CO_RHO"] = rhos[0]                      # the rho the final theta was fitted with
+        opt_success, opt_nit = fit_state["success"], fit_state["nit"]
+    else:
+        best_theta, opt_success, opt_nit = _fit(theta0)
 
     params = unpack_theta(best_theta, g)
     static_cache_full = build_static_cache(df_full, g)
@@ -417,7 +450,23 @@ def run_full_ekf_pipeline(df_full, config, max_iter, method, ng_cfg=None):
         opt_success, opt_nit, loglik, n_train=n_train,
     )
     result["P_smooth"] = P_smooth
+    if co_info is not None:
+        result["co_info"] = _co_info_for_equation(co_info, 0)
     return result
+
+
+def _co_info_for_equation(co_info, eq_idx):
+    """Slice the shared CO info dict down to one equation (0 = Dep 1,
+    1 = Dep 2) so each result dict carries just its own ρ / history."""
+    return {
+        "enabled": True,
+        "rho": co_info["rho"][eq_idx],
+        "rho_hat_last": co_info["rho_hat_last"][eq_idx],
+        "converged": co_info["converged"],
+        "n_iter": co_info["n_iter"],
+        "tol": co_info["tol"], "max_iter": co_info["max_iter"],
+        "history": [h for h in co_info["history"] if h["eq"] == eq_idx + 1],
+    }
 
 
 # ── Multi-dependent pipeline — now a genuine JOINT bivariate fit ────────────
@@ -619,50 +668,80 @@ def run_multi_dependent_pipeline(df_full, config, max_iter, method, ng_cfg=None)
     if loss_function_mode == "nll_only":
         lambda_reg = 0.0
 
-    if method == "Nevergrad" and NEVERGRAD_AVAILABLE and ng_cfg:
-        best_theta_joint, _ = run_nevergrad_optimizer_joint(
-            df_train, g1, g2, theta0_joint, bounds_joint, n1, n2, ng_cfg,
-            static_cache1=static_cache1_train, static_cache2=static_cache2_train,
-            lambda_reg=lambda_reg)
-        opt_success = True; opt_nit = ng_cfg.get("budget", 500)
-    else:
+    def _split_joint(theta_joint):
+        """theta_joint -> (theta_1, theta_2, rho_y, phi_1, phi_2). The
+        phi pair is absent from the layout (see above) when coupling is
+        off, and masked to exactly 0 for a direction that is pinned."""
+        th1 = theta_joint[:n1]
+        th2 = theta_joint[n1:n1+n2]
+        rho_y = float(np.clip(theta_joint[n1+n2], -0.995, 0.995))
+        if len(theta_joint) - (n1 + n2) >= 3:
+            ph1 = float(theta_joint[n1+n2+1]) if allow_phi1 else 0.0
+            ph2 = float(theta_joint[n1+n2+2]) if allow_phi2 else 0.0
+        else:
+            ph1 = ph2 = 0.0
+        return th1, th2, rho_y, ph1, ph2
+
+    def _fit_joint(theta_start):
+        """One full joint optimizer run (at whatever g1/g2["CO_RHO"] currently
+        are). Returns (best_theta_joint, success, n_iterations)."""
+        if method == "Nevergrad" and NEVERGRAD_AVAILABLE and ng_cfg:
+            best, _ = run_nevergrad_optimizer_joint(
+                df_train, g1, g2, theta_start, bounds_joint, n1, n2, ng_cfg,
+                static_cache1=static_cache1_train, static_cache2=static_cache2_train,
+                lambda_reg=lambda_reg)
+            return best, True, ng_cfg.get("budget", 500)
         # Same normalization fix as the single-dependent path above (see
         # modules/bounds.py::build_normalized_problem) — theta_joint mixes
         # the same wide-scale parameters (twice over, once per dependent
         # variable) plus rho/phi, so it needs it just as much.
-        theta0_joint_norm, norm_bounds_joint, unscale_joint = build_normalized_problem(
-            theta0_joint, bounds_joint)
+        theta_start_norm, norm_bounds_joint, unscale_joint = build_normalized_problem(
+            theta_start, bounds_joint)
 
         def objective(theta_joint_norm):
-            theta_joint = unscale_joint(theta_joint_norm)
-            theta1 = theta_joint[:n1]
-            theta2 = theta_joint[n1:n1+n2]
-            rho    = theta_joint[n1+n2]
-            if len(theta_joint) - (n1 + n2) >= 3:
-                phi1 = theta_joint[n1+n2+1] if allow_phi1 else 0.0
-                phi2 = theta_joint[n1+n2+2] if allow_phi2 else 0.0
-            else:
-                phi1 = phi2 = 0.0
-            p1 = unpack_theta(theta1, g1)
-            p2 = unpack_theta(theta2, g2)
+            th1, th2, rho_y, ph1, ph2 = _split_joint(unscale_joint(theta_joint_norm))
+            p1 = unpack_theta(th1, g1)
+            p2 = unpack_theta(th2, g2)
             loss, _, _, _, _ = joint_composite_loss(
-                df_train, p1, g1, p2, g2, rho, phi1, phi2, lambda_reg,
+                df_train, p1, g1, p2, g2, rho_y, ph1, ph2, lambda_reg,
                 static_cache1=static_cache1_train, static_cache2=static_cache2_train)
             return loss
-        opt = minimize(objective, theta0_joint_norm, method=method,
+        opt = minimize(objective, theta_start_norm, method=method,
                         bounds=norm_bounds_joint,
                         options={"maxiter": max_iter, "ftol": 1e-9, "eps": 1e-6})
-        best_theta_joint = unscale_joint(opt.x); opt_success = opt.success; opt_nit = opt.nit
+        return unscale_joint(opt.x), opt.success, opt.nit
 
-    best_theta1 = best_theta_joint[:n1]
-    best_theta2 = best_theta_joint[n1:n1+n2]
-    best_rho    = float(np.clip(best_theta_joint[n1+n2], -0.995, 0.995))
-    if len(best_theta_joint) - (n1 + n2) >= 3:
-        best_phi1 = float(best_theta_joint[n1+n2+1]) if allow_phi1 else 0.0
-        best_phi2 = float(best_theta_joint[n1+n2+2]) if allow_phi2 else 0.0
+    co_info = None
+    if g1["USE_COCHRANE_ORCUTT"]:
+        # Optional Cochrane-Orcutt loop (modules/cochrane_orcutt.py) — one
+        # AR(1) rho PER EQUATION (serial correlation within each dependent),
+        # kept separate from rho_y (correlation BETWEEN the two equations'
+        # whitened shocks), which is still estimated inside theta_joint.
+        fit_state = {"success": True, "nit": 0}
+
+        def fit_fn(rhos, theta_init):
+            g1["CO_RHO"], g2["CO_RHO"] = rhos[0], rhos[1]
+            th, ok, nit = _fit_joint(theta0_joint if theta_init is None else theta_init)
+            fit_state["success"] = ok; fit_state["nit"] += nit
+            return th
+
+        def resid_fn(theta_joint, rhos):
+            g1["CO_RHO"], g2["CO_RHO"] = rhos[0], rhos[1]
+            th1, th2, rho_y, ph1, ph2 = _split_joint(theta_joint)
+            (_, resid, *_rest) = run_bivariate_kalman_filter(
+                df_train, unpack_theta(th1, g1), g1, unpack_theta(th2, g2), g2,
+                rho_y, ph1, ph2,
+                static_cache1=static_cache1_train, static_cache2=static_cache2_train)
+            return [resid[1:, 0], resid[1:, 1]]   # drop t=0 (initial-state guess)
+
+        best_theta_joint, rhos, co_info = run_cochrane_orcutt(
+            fit_fn, resid_fn, 2, g1["CO_MAX_ITER"], g1["CO_TOL"])
+        g1["CO_RHO"], g2["CO_RHO"] = rhos[0], rhos[1]   # rho each final theta was fitted with
+        opt_success, opt_nit = fit_state["success"], fit_state["nit"]
     else:
-        best_phi1 = 0.0
-        best_phi2 = 0.0
+        best_theta_joint, opt_success, opt_nit = _fit_joint(theta0_joint)
+
+    best_theta1, best_theta2, best_rho, best_phi1, best_phi2 = _split_joint(best_theta_joint)
     params1 = unpack_theta(best_theta1, g1)
     params2 = unpack_theta(best_theta2, g2)
 
@@ -696,6 +775,10 @@ def run_multi_dependent_pipeline(df_full, config, max_iter, method, ng_cfg=None)
     # Results tab show what the regularizer actually saw, even though the
     # optimizer itself only ever saw the train-window version of these.
     full_nrmse, full_rmse1, full_rmse2 = compute_joint_nrmse(residuals_joint, df_full, g1, g2)
+
+    if co_info is not None:
+        results_1["co_info"] = _co_info_for_equation(co_info, 0)
+        results_2["co_info"] = _co_info_for_equation(co_info, 1)
 
     for res in (results_1, results_2):
         res["rho_y"] = best_rho

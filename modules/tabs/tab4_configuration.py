@@ -730,6 +730,71 @@ def render_tab4():
                else "Loss(Θ) = NLL(Θ)  *(λ forced to 0 — NRMSE not optimized)*")
         )
 
+    # ── D3. Autocorrelated errors — Cochrane-Orcutt (optional) ───────────
+    # OFF by default: nothing changes unless this is ticked. Applies to every
+    # fit mode (single dependent, joint bivariate, chained) and to Tab 8
+    # refits; with two dependents each equation gets its own AR(1) ρ. See
+    # modules/cochrane_orcutt.py for the full derivation.
+    st.markdown("#### Autocorrelated Errors — Cochrane-Orcutt (optional)")
+    use_cochrane_orcutt = st.checkbox(
+        "Fit with Cochrane-Orcutt AR(1) error correction",
+        value=False,
+        key="use_cochrane_orcutt_chk",
+        help=(
+            "The standard filter assumes each period's observation error is "
+            "independent. If the errors are serially correlated "
+            "(ε_t = ρ·ε_{t-1} + u_t) the flexible baseline / betas end up "
+            "soaking up that persistence.\n\n"
+            "With this ON the model is fitted by **Cochrane-Orcutt**: fit → "
+            "estimate ρ from the residuals → quasi-difference the observation "
+            "equation (y_t − ρ·y_{t-1} against L_t − ρ·L_{t-1}) → refit, "
+            "repeating until ρ stops changing. Betas, contributions and ROI "
+            "are still reported on the original (non-differenced) scale.\n\n"
+            "Each iteration is a full optimizer run, so expect roughly "
+            "(number of iterations) × the normal run time."
+        ),
+    )
+    co_max_iter, co_tol, co_keep_first_obs = 5, 0.01, True
+    if use_cochrane_orcutt:
+        co_c1, co_c2 = st.columns(2)
+        with co_c1:
+            co_max_iter = int(st.number_input(
+                "Max CO iterations", min_value=1, max_value=20, value=5, step=1,
+                key="co_max_iter_input",
+                help="Upper limit on fit → re-estimate ρ → refit rounds. "
+                     "Iteration 1 is the ordinary (ρ = 0) fit."))
+        with co_c2:
+            co_tol = float(st.number_input(
+                "Convergence tolerance on ρ", min_value=0.001, max_value=0.100,
+                value=0.010, step=0.001, format="%.3f", key="co_tol_input",
+                help="Stop when the newly estimated ρ differs from the ρ used "
+                     "in the last fit by less than this."))
+        co_keep_first_obs = st.checkbox(
+            "Keep the first observation (Prais-Winsten scaling)",
+            value=True, key="co_keep_first_chk",
+            help=(
+                "Classical Cochrane-Orcutt drops the first observation, since "
+                "it has no previous period to difference against. In a "
+                "state-space model that observation is also what anchors the "
+                "initial intercept / beta state, so dropping it can leave the "
+                "first few fitted values noticeably off.\n\n"
+                "**Checked (default)**: keep it, rescaled by √(1−ρ²) "
+                "(Prais-Winsten).\n\n"
+                "**Unchecked**: classical Cochrane-Orcutt — first observation "
+                "dropped."
+            ),
+        )
+        st.latex(
+            r"\varepsilon_t=\rho\,\varepsilon_{t-1}+u_t \;\Rightarrow\; "
+            r"y_t-\rho\,y_{t-1}=(L_t-\rho\,L_{t-1})\,x_t+u_t"
+        )
+        st.caption(
+            "ρ is estimated separately for each dependent variable "
+            "(serial correlation **within** an equation). In the joint fit it "
+            "is distinct from ρ(Dep1, Dep2), the correlation **between** the "
+            "two equations' shocks."
+        )
+
     # Summary box showing the active state equation. Adstock is now chosen
     # PER CHANNEL (adstock_map above) — the transform (Hill/Power) is still
     # one global choice for all media betas, so the equation shown here is
@@ -1022,6 +1087,10 @@ def render_tab4():
                 "intercept_dynamics_type_2": intercept_dynamics_type_2_str,
                 "cross_intercept_coupling_mode": cross_intercept_coupling_mode_str,
                 "loss_function_mode": loss_function_mode_str,
+                "use_cochrane_orcutt": bool(use_cochrane_orcutt),
+                "co_max_iter": int(co_max_iter),
+                "co_tol": float(co_tol),
+                "co_keep_first_obs": bool(co_keep_first_obs),
                 "adstock_n_lags": int(n_lags),
                 "use_organic": use_organic,
                 "use_price": use_price,
@@ -1067,6 +1136,12 @@ def render_tab4():
                 prophet_info(
                     f"📌 Prophet controls included in model: "
                     f"<b>{', '.join(prophet_in_model)}</b>"
+                )
+            if use_cochrane_orcutt:
+                st.info(
+                    f"🔁 **Cochrane-Orcutt AR(1) correction ON** — up to {co_max_iter} "
+                    f"iterations, ρ tolerance {co_tol:g}, first observation "
+                    f"{'kept (Prais-Winsten)' if co_keep_first_obs else 'dropped (classical CO)'}."
                 )
             if st.session_state.config["enable_second_dependent"]:
                 if dependent_relationship == "chained":

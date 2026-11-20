@@ -145,6 +145,7 @@ modules/pipeline.py::run_multi_dependent_pipeline.
 import numpy as np
 import pandas as pd
 
+from modules.cochrane_orcutt import quasi_difference_obs
 from modules.transforms import (
     apply_transformation,
     hill_transform_vec,
@@ -651,7 +652,18 @@ def run_kalman_filter(df, params, g, static_cache=None):
 
     `static_cache`: optional, from `build_static_cache(df, g)` — reuses
     the observation matrix across repeated calls instead of rebuilding it
-    every time (see build_static_cache's docstring). Safe to omit."""
+    every time (see build_static_cache's docstring). Safe to omit.
+
+    Cochrane-Orcutt (optional): if g["CO_RHO"] != 0 the UPDATE step runs
+    on the quasi-differenced observation  y*_t = y_t - rho*y_{t-1},
+    L*_t = L_t - rho*L_{t-1}  (white noise u_t, variance sigma_y^2), and
+    the first observation is Prais-Winsten-scaled (default) or, if
+    g["CO_KEEP_FIRST"] is False, skipped (classical CO). The
+    returned `yhat` / `residuals` are always the STRUCTURAL ones
+    (L_t · x_pred_t, y_t - that), so downstream metrics keep their usual
+    meaning; only the state update and `loglik` use the whitened
+    equation. With CO_RHO = 0 (default) this is exactly the original
+    filter. See modules/cochrane_orcutt.py."""
     pc = _prepare_equation(df, g, params, static_cache=static_cache)
     dim = pc["dim"]; T_len = pc["T_len"]
     L_mat = pc["L_mat"]; Tmat = pc["Tmat"]; Q = pc["Q"]
@@ -666,6 +678,15 @@ def run_kalman_filter(df, params, g, static_cache=None):
     x_filt[0] = x0; P_filt[0] = P0
     target_vals = pc["target_vals"]
 
+    # Observation used by the UPDATE step (== structural when CO is off).
+    co_rho = float(g.get("CO_RHO", 0.0) or 0.0)
+    use_co = abs(co_rho) > 1e-12
+    keep_first = bool(g.get("CO_KEEP_FIRST", True))
+    if use_co:
+        y_obs, L_obs = quasi_difference_obs(target_vals, L_mat, co_rho, keep_first=keep_first)
+    else:
+        y_obs, L_obs = target_vals, L_mat
+
     for t in range(T_len):
         if t > 0:
             x_p, cross_row = _predict_step(t, x_filt[t-1], df, pc)
@@ -675,16 +696,24 @@ def run_kalman_filter(df, params, g, static_cache=None):
         else:
             x_pred[0] = x_filt[0].copy(); P_pred[0] = P_filt[0].copy()
 
-        L_t = L_mat[t]
-        yhat[t]      = L_t @ x_pred[t]
+        # structural fit / residual (what the rest of the app reports)
+        yhat[t]      = L_mat[t] @ x_pred[t]
         residuals[t] = target_vals[t] - yhat[t]
+
+        if use_co and t == 0 and not keep_first:
+            # Classical CO drops the first observation: no update, no likelihood.
+            x_filt[0] = x_pred[0].copy(); P_filt[0] = P_pred[0].copy()
+            continue
+
+        L_t = L_obs[t]
+        v_t = y_obs[t] - L_t @ x_pred[t]          # == residuals[t] when CO is off
         LP  = L_t @ P_pred[t]
         S_t = max(LP @ L_t + R, 1e-8)
         K   = (P_pred[t] @ L_t) / S_t
-        x_filt[t] = x_pred[t] + K * residuals[t]
+        x_filt[t] = x_pred[t] + K * v_t
         x_filt[t] = _apply_beta_floors(x_filt[t], pc)
         P_filt[t] = (np.eye(dim) - np.outer(K, L_t)) @ P_pred[t]
-        loglik += -0.5 * (np.log(2 * np.pi * S_t) + residuals[t]**2 / S_t)
+        loglik += -0.5 * (np.log(2 * np.pi * S_t) + v_t**2 / S_t)
 
     return yhat, residuals, x_filt, P_filt, x_pred, P_pred, Tmat, cross_beta_contrib, loglik
 
@@ -732,6 +761,16 @@ def run_bivariate_kalman_filter(df, params1, g1, params2, g2, rho, phi1=0.0, phi
     / `build_static_cache(df, g2)` — reuses each equation's observation
     matrix across repeated calls instead of rebuilding it every time.
     Safe to omit.
+
+    Cochrane-Orcutt (optional): each equation has its OWN AR(1) error
+    coefficient, g1["CO_RHO"] / g2["CO_RHO"] (0.0 = off for that
+    equation). Where non-zero, that equation's row of the update uses the
+    quasi-differenced observation y*_t = y_t - rho_i*y_{t-1},
+    L*_t = L_t - rho_i*L_{t-1}, and its first observation is skipped (an
+    equation with CO off still updates at t = 0). The 2x2 noise matrix R
+    (sigma_1, sigma_2, cross-equation correlation rho) then describes the
+    WHITENED shocks u_t. Returned yhat / residuals stay structural. See
+    modules/cochrane_orcutt.py.
     """
     pc1 = _prepare_equation(df, g1, params1, static_cache=static_cache1)
     pc2 = _prepare_equation(df, g2, params2, static_cache=static_cache2)
@@ -773,6 +812,20 @@ def run_bivariate_kalman_filter(df, params1, g1, params2, g2, rho, phi1=0.0, phi
         [rho * sigma1 * sigma2,  sigma2 ** 2],
     ])
 
+    # Observation used by the UPDATE step per equation (structural when
+    # that equation's CO_RHO is 0).
+    co1 = float(g1.get("CO_RHO", 0.0) or 0.0); co2 = float(g2.get("CO_RHO", 0.0) or 0.0)
+    use_co1 = abs(co1) > 1e-12; use_co2 = abs(co2) > 1e-12
+    keep1 = bool(g1.get("CO_KEEP_FIRST", True)); keep2 = bool(g2.get("CO_KEEP_FIRST", True))
+    y_obs1, L_obs1 = (quasi_difference_obs(pc1["target_vals"], pc1["L_mat"], co1, keep_first=keep1)
+                      if use_co1 else (pc1["target_vals"], pc1["L_mat"]))
+    y_obs2, L_obs2 = (quasi_difference_obs(pc2["target_vals"], pc2["L_mat"], co2, keep_first=keep2)
+                      if use_co2 else (pc2["target_vals"], pc2["L_mat"]))
+    y_obs = np.column_stack([y_obs1, y_obs2])
+    # An equation's first observation is skipped only for classical CO
+    # (CO on AND keep_first off); otherwise it still updates at t = 0.
+    skip0_1 = use_co1 and not keep1; skip0_2 = use_co2 and not keep2
+
     for t in range(T_len):
         if t > 0:
             x_p1, cross_row1 = _predict_step(t, x_filt[t-1, :dim1], df, pc1)
@@ -788,30 +841,50 @@ def run_bivariate_kalman_filter(df, params1, g1, params2, g2, rho, phi1=0.0, phi
             x_pred[0] = x_filt[0].copy(); P_pred[0] = P_filt[0].copy()
 
         # ── Joint observation matrix (2 × dim) ────────────────────────
-        L_t = np.zeros((2, dim))
-        L_t[0, :dim1] = pc1["L_mat"][t]
-        L_t[1, dim1:] = pc2["L_mat"][t]
-
-        yhat[t] = L_t @ x_pred[t]
+        # Structural rows (for the reported yhat / residuals) ...
+        L_struct = np.zeros((2, dim))
+        L_struct[0, :dim1] = pc1["L_mat"][t]
+        L_struct[1, dim1:] = pc2["L_mat"][t]
+        yhat[t] = L_struct @ x_pred[t]
         residuals[t] = targets[t] - yhat[t]
 
-        PLt = P_pred[t] @ L_t.T                    # (dim, 2)
-        S_t = L_t @ PLt + R                         # (2, 2) innovation covariance
-        S_t = S_t + np.eye(2) * 1e-10               # numerical safety
-        S_inv = np.linalg.inv(S_t)
-        K = PLt @ S_inv                             # (dim, 2) joint Kalman gain
+        # ... and the rows the UPDATE actually uses (== structural unless
+        # an equation is on Cochrane-Orcutt, in which case quasi-differenced).
+        L_upd = np.zeros((2, dim))
+        L_upd[0, :dim1] = L_obs1[t]
+        L_upd[1, dim1:] = L_obs2[t]
+        v_t = y_obs[t] - L_upd @ x_pred[t]
 
-        x_filt[t] = x_pred[t] + K @ residuals[t]
+        # Classical CO drops each CO-equation's first observation; if both
+        # are dropped there is nothing to update at t = 0.
+        if t == 0 and (skip0_1 or skip0_2):
+            rows = [i for i, c in enumerate((skip0_1, skip0_2)) if not c]
+            if not rows:
+                x_filt[0] = x_pred[0].copy(); P_filt[0] = P_pred[0].copy()
+                continue
+            L_u = L_upd[rows]; v_u = v_t[rows]; R_u = R[np.ix_(rows, rows)]
+        else:
+            rows = [0, 1]
+            L_u = L_upd; v_u = v_t; R_u = R
+        n_act = len(rows)
+
+        PLt = P_pred[t] @ L_u.T                    # (dim, n_act)
+        S_t = L_u @ PLt + R_u                       # innovation covariance
+        S_t = S_t + np.eye(n_act) * 1e-10           # numerical safety
+        S_inv = np.linalg.inv(S_t)
+        K = PLt @ S_inv                             # (dim, n_act) joint Kalman gain
+
+        x_filt[t] = x_pred[t] + K @ v_u
         x_filt[t, :dim1] = _apply_beta_floors(x_filt[t, :dim1].copy(), pc1)
         x_filt[t, dim1:] = _apply_beta_floors(x_filt[t, dim1:].copy(), pc2)
 
-        P_filt[t] = (np.eye(dim) - K @ L_t) @ P_pred[t]
+        P_filt[t] = (np.eye(dim) - K @ L_u) @ P_pred[t]
 
         sign, logdet = np.linalg.slogdet(S_t)
         if sign <= 0:
             logdet = np.log(1e-12)
-        quad = residuals[t] @ S_inv @ residuals[t]
-        loglik += -0.5 * (2 * np.log(2 * np.pi) + logdet + quad)
+        quad = v_u @ S_inv @ v_u
+        loglik += -0.5 * (n_act * np.log(2 * np.pi) + logdet + quad)
 
     return (yhat, residuals, x_filt, P_filt, x_pred, P_pred, Tmat_joint,
             cross1, cross2, loglik, dim1, dim2)

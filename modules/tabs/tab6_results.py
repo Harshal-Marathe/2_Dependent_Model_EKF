@@ -472,6 +472,15 @@ def render_full_results(df, config, res, target, key_prefix="", pcb_key="per_cha
     with st.expander("📊 R² metrics"):
         st.metric("R²", f"{res['r2']:.4f}")
 
+    _co = res.get("co_info")
+    if _co:
+        st.caption(
+            f"🔁 Cochrane-Orcutt AR(1) correction applied: ρ = {_co['rho']:.3f} "
+            f"({'converged' if _co['converged'] else 'iteration limit reached'} after "
+            f"{_co['n_iter']} iteration(s)). Fitted values, contributions and ROI are on "
+            f"the original (non-differenced) scale."
+        )
+
     n_test = res.get("n_test", 0)
     if n_test and n_test > 0:
         st.markdown("###### In-Sample (Train) vs. Out-of-Sample (Test) Accuracy")

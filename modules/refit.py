@@ -30,7 +30,8 @@ from modules.params import _make_globals, unpack_theta
 from modules.bounds import _build_theta0_and_bounds, build_normalized_problem
 from modules.optimizer import run_nevergrad_optimizer
 from modules.kalman import run_kalman_filter, rts_smoother, _precompute_adstocked, build_static_cache
-from modules.pipeline import _postprocess_equation
+from modules.cochrane_orcutt import run_cochrane_orcutt
+from modules.pipeline import _postprocess_equation, _co_info_for_equation
 
 
 # ────────────────────────────────────────────────────────────────────
@@ -426,17 +427,19 @@ def run_refit_pipeline(df_full, new_config, prev_result, max_iter, method,
 
     static_cache_train = build_static_cache(df_train, g_new)
 
-    if method == "Nevergrad" and NEVERGRAD_AVAILABLE and ng_cfg:
-        best_theta, _ = run_nevergrad_optimizer(df_train, g_new, theta0, bounds, ng_cfg,
-                                                  static_cache=static_cache_train)
-        opt_success, opt_nit = True, ng_cfg.get("budget", 500)
-    else:
+    def _fit(theta_start):
+        """One full optimizer run (at whatever g_new["CO_RHO"] currently is).
+        Returns (best_theta, success, n_iterations)."""
+        if method == "Nevergrad" and NEVERGRAD_AVAILABLE and ng_cfg:
+            best, _ = run_nevergrad_optimizer(df_train, g_new, theta_start, bounds, ng_cfg,
+                                               static_cache=static_cache_train)
+            return best, True, ng_cfg.get("budget", 500)
         # Same fix as run_full_ekf_pipeline (see
         # modules/bounds.py::build_normalized_problem) — refit's theta has
         # the same wide-scale mix, so it's just as prone to `n` (and other
         # small-range params) getting stuck at their warm-started/init
         # value under a single unscaled finite-difference `eps`.
-        theta0_norm, norm_bounds, unscale = build_normalized_problem(theta0, bounds)
+        theta0_norm, norm_bounds, unscale = build_normalized_problem(theta_start, bounds)
 
         def objective(theta_norm):
             theta = unscale(theta_norm)
@@ -447,7 +450,34 @@ def run_refit_pipeline(df_full, new_config, prev_result, max_iter, method,
         opt = minimize(objective, theta0_norm, method=method,
                         bounds=norm_bounds,
                         options={"maxiter": max_iter, "ftol": 1e-9, "eps": 1e-6})
-        best_theta, opt_success, opt_nit = unscale(opt.x), opt.success, opt.nit
+        return unscale(opt.x), opt.success, opt.nit
+
+    co_info = None
+    if g_new["USE_COCHRANE_ORCUTT"]:
+        # Optional Cochrane-Orcutt loop — same as run_full_ekf_pipeline
+        # (modules/cochrane_orcutt.py). The first iteration is the refit
+        # exactly as it would run with CO off; later ones warm-start from it
+        # (frozen parameters stay frozen: their bounds are already pinned).
+        fit_state = {"success": True, "nit": 0}
+
+        def fit_fn(rhos, theta_init):
+            g_new["CO_RHO"] = rhos[0]
+            th, ok, nit = _fit(theta0 if theta_init is None else theta_init)
+            fit_state["success"] = ok; fit_state["nit"] += nit
+            return th
+
+        def resid_fn(theta, rhos):
+            g_new["CO_RHO"] = rhos[0]
+            p = unpack_theta(theta, g_new)
+            _, resid, *_ = run_kalman_filter(df_train, p, g_new, static_cache=static_cache_train)
+            return [resid[1:]]
+
+        best_theta, rhos, co_info = run_cochrane_orcutt(
+            fit_fn, resid_fn, 1, g_new["CO_MAX_ITER"], g_new["CO_TOL"])
+        g_new["CO_RHO"] = rhos[0]
+        opt_success, opt_nit = fit_state["success"], fit_state["nit"]
+    else:
+        best_theta, opt_success, opt_nit = _fit(theta0)
 
     params = unpack_theta(best_theta, g_new)
     static_cache_full = build_static_cache(df_full, g_new)
@@ -461,4 +491,6 @@ def run_refit_pipeline(df_full, new_config, prev_result, max_iter, method,
         opt_success, opt_nit, loglik, n_train=n_train,
     )
     result["P_smooth"] = P_smooth
+    if co_info is not None:
+        result["co_info"] = _co_info_for_equation(co_info, 0)
     return result
