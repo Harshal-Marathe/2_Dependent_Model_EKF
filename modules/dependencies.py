@@ -18,8 +18,12 @@ except ImportError:
     make_holidays_df = None
     HOLIDAYS_AVAILABLE = False
 
+# Kept so older imports don't break; the optimizer it gated was replaced by MCMC.
+NEVERGRAD_AVAILABLE = False
+
 try:
-    import nevergrad as ng  # noqa: F401
-    NEVERGRAD_AVAILABLE = True
+    import numpyro  # noqa: F401
+    import jax      # noqa: F401
+    MCMC_AVAILABLE = True
 except ImportError:
-    NEVERGRAD_AVAILABLE = False
+    MCMC_AVAILABLE = False

@@ -10,7 +10,7 @@ exactly, by construction:
   - Intercept:           Raw = Transformed = 1.0
   - Media / Comp Media:  Transformed = Raw spend/impressions (what the
                           observation equation actually multiplies the
-                          beta by — see kalman.py _build_observation_matrix;
+                          beta by — see statespace.py _build_observation_matrix;
                           carryover lives in beta's own decay, not in an
                           adstocked observation-side regressor)
   - Non-media / Comp Non-media / Price: Transformed = Raw (no transform
@@ -71,7 +71,7 @@ def build_intercept_decomposition_df(res, df_full):
     Transform Type (Power/Hill) is set via config "intercept_transform_type"
     (g["INTERCEPT_TRANSFORM_TYPE"]); Dynamics Type (Carryover/Simple) via
     config "intercept_dynamics_type" (g["INTERCEPT_DYNAMICS_TYPE"]) — the
-    two are independent. See modules/kalman.py's module docstring. Every
+    two are independent. See modules/statespace.py's module docstring. Every
     intercept-effector column is transformed the same way, whether or not
     it's also a media channel with its own beta.
 
@@ -340,7 +340,8 @@ def build_full_results_zip_bytes(res, config, df_full, response_curve_images=Non
     betas_df = build_betas_df(res, df_full)
     param_df = res["param_df"]
     roi_df   = res["roi_df"]
-    contrib_df = res["contrib_df"]
+    from modules.uncertainty import strip_band_columns
+    contrib_df, _ = strip_band_columns(res["contrib_df"], g=res.get("g"))
     synergy_df = res.get("synergy_df")
     has_synergy = synergy_df is not None and not synergy_df.empty
 

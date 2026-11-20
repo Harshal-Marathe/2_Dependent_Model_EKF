@@ -6,8 +6,8 @@ dependent variable" (e.g. 10% of 100 rows -> 10 dummies) instead of hand-
 picking individual dates. Each flagged observation gets its OWN single-period
 impulse dummy column (1 at that row, 0 everywhere else) — these plug directly
 into the existing `dummy_cols` / `DUMMY_COLS` mechanism already wired through
-modules/params.py -> modules/kalman.py (own dedicated, mildly-persistent,
-Kalman-filtered beta per dummy column; see kalman.py's `_build_transition_matrix`
+modules/params.py -> modules/statespace.py (own dedicated, mildly-persistent,
+state-space beta per dummy column; see mcmc.py build_dynamics
 / `_build_process_noise`, which give every dummy state Ls=0.98 and a
 comparatively large process-noise 5e-3 — i.e. its "beta" is essentially a
 free, per-period level-shift the filter fits on its own, not something that
