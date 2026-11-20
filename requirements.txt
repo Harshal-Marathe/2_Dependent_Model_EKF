@@ -5,6 +5,5 @@ plotly
 kaleido
 scipy
 prophet
+nevergrad
 openpyxl
-jax
-numpyro
