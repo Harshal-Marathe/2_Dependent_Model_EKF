@@ -20,7 +20,8 @@ import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 
 from modules.ui_helpers import section, need_model, safe_multiselect
-from modules.transforms import hill_transform, power_transform, apply_transformation
+from modules.transforms import (power_transform, apply_transformation,
+                                hill_adstock_response_curve)
 from modules.exports import build_betas_df, build_master_workbook_bytes, build_full_results_zip_bytes
 
 
@@ -379,8 +380,14 @@ def _make_response_curve_fig(sel, idx, df, res, g, params, x_max_pct=150,
     beta_p25 = float(np.percentile(res["x_smooth"][:, idx+1], 25))
     beta_p75 = float(np.percentile(res["x_smooth"][:, idx+1], 75))
     n_v = params["n_params"][idx]; S_v = params["S_params"][idx]
+    a_v = params["a_params"][idx]
 
     def make_resp(b):
+        if transform_type == "hill":
+            # Hill with adstock: steady-state level x/(1-adstock), half-sat
+            # anchored on gamma * max(adstocked actual series)
+            return b * hill_adstock_response_curve(
+                x_range, col_data.values, a_v, n_v, S_v)
         return np.array([b * apply_transformation(
             np.array([x]), transform_type, n_v, S_v)[0] for x in x_range])
 

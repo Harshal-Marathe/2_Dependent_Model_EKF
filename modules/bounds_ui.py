@@ -103,29 +103,36 @@ def render_per_channel_bounds(channel_cols, comp_cols, key_prefix, df,
 
                 # Transformation parameters
                 if use_hill:
-                    st.markdown("**Hill Slope (n)** — controls steepness of S-curve")
+                    st.markdown("**Hill Adstock** — a_t = x_t + adstock·a_(t-1)  (range 0.1 – 0.9)")
+                    hac1, hac2 = st.columns(2)
+                    with hac1:
+                        ha_lo = st.number_input("adstock min", 0.1, 0.9, 0.1, 0.05,
+                                                 key=f"{key_prefix}ha_lo_{col}")
+                    with hac2:
+                        ha_hi = st.number_input("adstock max", 0.1, 0.9, 0.9, 0.05,
+                                                 key=f"{key_prefix}ha_hi_{col}")
+                    bounds[col]["hill_adstock"] = (ha_lo, ha_hi)
+                    st.divider()
+
+                    st.markdown("**Hill Alpha** — steepness of the S-curve  (range 0.1 – 0.9)")
                     hnc1, hnc2 = st.columns(2)
                     with hnc1:
-                        hn_lo = st.number_input("n min", 0.01, 15.0, 1.0, 0.1,
+                        hn_lo = st.number_input("alpha min", 0.1, 0.9, 0.1, 0.05,
                                                  key=f"{key_prefix}hn_lo_{col}")
                     with hnc2:
-                        hn_hi = st.number_input("n max", 0.01, 15.0, 15.0, 0.5,
+                        hn_hi = st.number_input("alpha max", 0.1, 0.9, 0.9, 0.05,
                                                  key=f"{key_prefix}hn_hi_{col}")
                     bounds[col]["hill_n"] = (hn_lo, hn_hi)
                     st.divider()
 
-                    st.markdown(f"**Hill Half-Saturation (S)** — data range: 0 – {col_max:,.0f}")
+                    st.markdown("**Hill Gamma** — half-saturation as a fraction of max(adstocked series)  (range 0.1 – 0.9)")
                     hsc1, hsc2 = st.columns(2)
                     with hsc1:
-                        hs_lo = st.number_input("S min", 1e-9, 1e12,
-                                                 float(f"{def_s_lo:.4g}"),
-                                                 key=f"{key_prefix}hs_lo_{col}",
-                                                 format="%.4g")
+                        hs_lo = st.number_input("gamma min", 0.1, 0.9, 0.1, 0.05,
+                                                 key=f"{key_prefix}hs_lo_{col}")
                     with hsc2:
-                        hs_hi = st.number_input("S max", 1e-9, 1e12,
-                                                 float(f"{def_s_hi:.4g}"),
-                                                 key=f"{key_prefix}hs_hi_{col}",
-                                                 format="%.4g")
+                        hs_hi = st.number_input("gamma max", 0.1, 0.9, 0.9, 0.05,
+                                                 key=f"{key_prefix}hs_hi_{col}")
                     bounds[col]["hill_s"] = (hs_lo, hs_hi)
                 else:
                     st.markdown("**Power Exponent (n)** — n ∈ (0,1] for diminishing returns")

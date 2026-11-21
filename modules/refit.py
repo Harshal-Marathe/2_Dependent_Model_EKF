@@ -52,11 +52,11 @@ ROLE_LABELS = {
 ROLE_PARAM_BLOCK = {
     ("media", "ls"): "Ls",
     ("media", "hill_n"): "n_params", ("media", "transform_n"): "n_params",
-    ("media", "hill_s"): "S_params",
+    ("media", "hill_s"): "S_params", ("media", "hill_adstock"): "a_params",
     ("media", "adstock_shape"): "adstock_shape", ("media", "adstock_scale"): "adstock_scale",
     ("comp_media", "ls"): "Ls_comp",
     ("comp_media", "hill_n"): "n_comp", ("comp_media", "transform_n"): "n_comp",
-    ("comp_media", "hill_s"): "S_comp",
+    ("comp_media", "hill_s"): "S_comp", ("comp_media", "hill_adstock"): "a_comp",
     ("comp_media", "adstock_shape"): "adstock_shape", ("comp_media", "adstock_scale"): "adstock_scale",
     ("price", "ls"): "Ls_price",
     ("non_media", "ls"): "Ls_own_nonmedia",
@@ -143,13 +143,14 @@ def variable_role_lists(config: dict):
 # ────────────────────────────────────────────────────────────────────
 _BLOCK_TO_GKEY = {
     "Ls": "MEDIA_COLS", "delta": "MEDIA_COLS",
-    "n_params": "MEDIA_COLS", "S_params": "MEDIA_COLS",
+    "n_params": "MEDIA_COLS", "S_params": "MEDIA_COLS", "a_params": "MEDIA_COLS",
     "gamma": "INTERCEPT_EFFECTORS", "n_intercept": "INTERCEPT_EFFECTORS",
-    "S_intercept": "INTERCEPT_EFFECTORS",
+    "S_intercept": "INTERCEPT_EFFECTORS", "a_intercept": "INTERCEPT_EFFECTORS",
     "Ls_own_nonmedia": "OWN_NONMEDIA_COLS", "delta_own_nonmedia": "OWN_NONMEDIA_COLS",
     "Ls_comp_nonmedia": "COMP_NONMEDIA_COLS", "delta_comp_nonmedia": "COMP_NONMEDIA_COLS",
     "Ls_comp": "COMP_MEDIA_COLS", "delta_comp": "COMP_MEDIA_COLS",
     "n_comp": "COMP_MEDIA_COLS", "S_comp": "COMP_MEDIA_COLS",
+    "a_comp": "COMP_MEDIA_COLS",
     "Ls_price": "PRICE_COLS", "delta_price": "PRICE_COLS",
 }
 
@@ -189,8 +190,10 @@ def _block_slices(g: dict):
     add("gamma", N_EFFECTORS, cols=g["INTERCEPT_EFFECTORS"])
     add("n_params", N_MEDIA, cols=g["MEDIA_COLS"])
     add("S_params", N_MEDIA, cols=g["MEDIA_COLS"])
+    add("a_params", N_MEDIA, cols=g["MEDIA_COLS"])
     add("n_intercept", N_EFFECTORS, cols=g["INTERCEPT_EFFECTORS"])
     add("S_intercept", N_EFFECTORS, cols=g["INTERCEPT_EFFECTORS"])
+    add("a_intercept", N_EFFECTORS, cols=g["INTERCEPT_EFFECTORS"])
     if N_ADSTOCK:
         add("adstock_shape", N_ADSTOCK, cols=adstock_weibull_cols)
         add("adstock_scale", N_ADSTOCK, cols=adstock_weibull_cols)
@@ -202,9 +205,11 @@ def _block_slices(g: dict):
     add("delta_comp", N_COMP, cols=g["COMP_MEDIA_COLS"])
     add("n_comp", N_COMP, cols=g["COMP_MEDIA_COLS"])
     add("S_comp", N_COMP, cols=g["COMP_MEDIA_COLS"])
+    add("a_comp", N_COMP, cols=g["COMP_MEDIA_COLS"])
     add("cross_delta", N_CROSS, pairs=g["CROSS_MEDIA_PAIRS"])
     add("cross_n", N_CROSS, pairs=g["CROSS_MEDIA_PAIRS"])
     add("cross_S", N_CROSS, pairs=g["CROSS_MEDIA_PAIRS"])
+    add("cross_a", N_CROSS, pairs=g["CROSS_MEDIA_PAIRS"])
     add("Ls_price", N_PRICE, cols=g["PRICE_COLS"])
     add("delta_price", N_PRICE, cols=g["PRICE_COLS"])
     if USE_ORGANIC_DRIFT:
@@ -360,13 +365,15 @@ def editable_params_for_role(role, g, col=None):
         delta_key = "delta_comp" if is_comp else "delta"
         n_key     = "n_comp" if is_comp else "n_params"
         s_key     = "S_comp" if is_comp else "S_params"
+        a_key     = "a_comp" if is_comp else "a_params"
         specs = [
             (ls_key, "Beta persistence (Ls)", True),
             (delta_key, "Delta (beta coefficient)", False),
-            (n_key, "Hill slope (n)" if (transform_hill or is_comp) else "Power exponent (n)", False),
+            (n_key, "Hill alpha" if (transform_hill or is_comp) else "Power exponent (n)", False),
         ]
         if transform_hill or is_comp:
-            specs.append((s_key, "Hill half-saturation (S)", False))
+            specs.append((s_key, "Hill gamma (× max adstocked)", False))
+            specs.append((a_key, "Hill adstock", False))
         if weibull:
             specs += [("adstock_shape", "Adstock shape (k)", False),
                       ("adstock_scale", "Adstock scale (λ)", False)]

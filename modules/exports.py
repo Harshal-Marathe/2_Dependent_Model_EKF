@@ -102,8 +102,9 @@ def build_intercept_decomposition_df(res, df_full):
             continue
         ni_int = params["n_intercept"][k]
         si_int = params["S_intercept"][k]
+        ai_int = params["a_intercept"][k]
         raw = df_full[col].values.astype(float)
-        transformed = apply_transformation(raw, INTERCEPT_TRANSFORM_TYPE, ni_int, si_int)
+        transformed = apply_transformation(raw, INTERCEPT_TRANSFORM_TYPE, ni_int, si_int, ai_int)
         gxt = params["gamma"][k] * transformed
 
         media_name, trans_name, gxt_name = f"Media_{col}", f"Transformed_{col}", f"GammaXTransformed_{col}"

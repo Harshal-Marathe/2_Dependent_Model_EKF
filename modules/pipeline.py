@@ -26,7 +26,7 @@ from modules.kalman import (
     _precompute_adstocked, _build_observation_matrix, build_static_cache,
     joint_composite_loss, compute_joint_nrmse,
 )
-from modules.transforms import apply_transformation, hill_transform_vec
+from modules.transforms import apply_transformation, hill_adstock_vec
 from modules.metrics import safe_mape
 from modules.cochrane_orcutt import run_cochrane_orcutt
 
@@ -196,8 +196,9 @@ def _postprocess_equation(df_full, g, params, x_smooth, adstocked_media,
             continue
         ni_int = params["n_intercept"][k]
         si_int = params["S_intercept"][k]
+        ai_int = params["a_intercept"][k]
         raw = df_full[col].values.astype(float)
-        transformed = apply_transformation(raw, INTERCEPT_TRANSFORM_TYPE, ni_int, si_int)
+        transformed = apply_transformation(raw, INTERCEPT_TRANSFORM_TYPE, ni_int, si_int, ai_int)
         contrib_df[f"LongTerm_{col}"] = params["gamma"][k] * transformed
 
     for k, (tgt, src) in enumerate(g["CROSS_MEDIA_PAIRS"]):
@@ -238,8 +239,9 @@ def _postprocess_equation(df_full, g, params, x_smooth, adstocked_media,
             "Total Synergy Contribution": total_synergy,
             "Avg Synergy / Period": float(contrib_df[col_name].mean()),
             "Cross Delta": float(params["cross_delta"][k]),
-            "Cross Hill n": float(params["cross_n"][k]),
-            "Cross Hill S": float(params["cross_S"][k]),
+            "Cross Hill alpha": float(params["cross_n"][k]),
+            "Cross Hill gamma": float(params["cross_S"][k]),
+            "Cross Hill adstock": float(params["cross_a"][k]),
             "Share of Target's Total Contrib (%)": (
                 round(100 * total_synergy / tgt_total, 2)
                 if tgt_total and tgt_total != 0 and not np.isnan(tgt_total) else np.nan
@@ -257,20 +259,25 @@ def _postprocess_equation(df_full, g, params, x_smooth, adstocked_media,
         })
         param_rows.append({
             "Category": "Intercept Effector", "Variable": f"{col} ({effector_kind})",
-            "Parameter": f"n_intercept ({'Hill slope' if INTERCEPT_TRANSFORM_TYPE == 'hill' else 'exponent'})",
+            "Parameter": f"n_intercept ({'Hill alpha' if INTERCEPT_TRANSFORM_TYPE == 'hill' else 'exponent'})",
             "Value": params["n_intercept"][k],
         })
         if INTERCEPT_TRANSFORM_TYPE == "hill":
             param_rows.append({
                 "Category": "Intercept Effector", "Variable": f"{col} ({effector_kind})",
-                "Parameter": "S_intercept (Half-sat)", "Value": params["S_intercept"][k],
+                "Parameter": "S_intercept (Hill gamma)", "Value": params["S_intercept"][k],
+            })
+            param_rows.append({
+                "Category": "Intercept Effector", "Variable": f"{col} ({effector_kind})",
+                "Parameter": "a_intercept (Hill adstock)", "Value": params["a_intercept"][k],
             })
 
     for i, col in enumerate(MEDIA_COLS):
         if TRANSFORM_TYPE == "hill":
             transform_rows = [
-                {"Category":"Media","Variable":col,"Parameter":"n (Hill slope)","Value":params["n_params"][i]},
-                {"Category":"Media","Variable":col,"Parameter":"S (Half-sat)",  "Value":params["S_params"][i]},
+                {"Category":"Media","Variable":col,"Parameter":"alpha (Hill)","Value":params["n_params"][i]},
+                {"Category":"Media","Variable":col,"Parameter":"gamma (Hill, × max adstocked)",  "Value":params["S_params"][i]},
+                {"Category":"Media","Variable":col,"Parameter":"adstock (Hill)",  "Value":params["a_params"][i]},
             ]
         else:
             transform_rows = [
@@ -297,6 +304,7 @@ def _postprocess_equation(df_full, g, params, x_smooth, adstocked_media,
             {"Category":"CompMedia","Variable":col,"Parameter":"Delta_comp", "Value":params["delta_comp"][j]},
             {"Category":"CompMedia","Variable":col,"Parameter":"n_comp",     "Value":params["n_comp"][j]},
             {"Category":"CompMedia","Variable":col,"Parameter":"S_comp",     "Value":params["S_comp"][j]},
+            {"Category":"CompMedia","Variable":col,"Parameter":"a_comp (Hill adstock)", "Value":params["a_comp"][j]},
         ]
         if ADSTOCK_MAP.get(col) == "weibull" and col in ADSTOCK_IDX:
             ai = ADSTOCK_IDX[col]
@@ -339,8 +347,9 @@ def _postprocess_equation(df_full, g, params, x_smooth, adstocked_media,
         pair_label = f"{src}→{tgt}"
         param_rows += [
             {"Category":"Synergy","Variable":pair_label,"Parameter":"Cross Delta", "Value":params["cross_delta"][k]},
-            {"Category":"Synergy","Variable":pair_label,"Parameter":"Cross Hill n","Value":params["cross_n"][k]},
-            {"Category":"Synergy","Variable":pair_label,"Parameter":"Cross Hill S","Value":params["cross_S"][k]},
+            {"Category":"Synergy","Variable":pair_label,"Parameter":"Cross Hill alpha","Value":params["cross_n"][k]},
+            {"Category":"Synergy","Variable":pair_label,"Parameter":"Cross Hill gamma","Value":params["cross_S"][k]},
+            {"Category":"Synergy","Variable":pair_label,"Parameter":"Cross Hill adstock","Value":params["cross_a"][k]},
         ]
     if g.get("INTERCEPT_DYNAMICS_TYPE", "carryover") == "simple":
         param_rows.append({"Category":"Global","Variable":"Intercept","Parameter":"I0",     "Value":params.get("I0", 0.0)})

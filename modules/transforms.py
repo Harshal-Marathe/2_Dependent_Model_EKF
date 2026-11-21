@@ -5,6 +5,11 @@ and adstock (carry-over) models including Weibull with per-lag weights.
 
 import numpy as np
 import pandas as pd
+from scipy.signal import lfilter
+
+# Allowed range for the three Hill-with-adstock parameters (adstock, alpha, gamma)
+HILL_PARAM_LO = 0.1
+HILL_PARAM_HI = 0.9
 
 
 # ── Hill transformation ─────────────────────────────────────────────────────
@@ -19,6 +24,46 @@ def hill_transform(x: float, n: float, S: float) -> float:
     if x <= 0:
         return 0.0
     return (x ** n) / (x ** n + S ** n + 1e-30)
+
+
+# ── Hill with built-in geometric adstock ────────────────────────────────────
+#
+#   a_t   = x_t + adstock · a_{t-1}
+#   hill  = a_t^alpha / ( a_t^alpha + (gamma · max(a))^alpha )
+#
+# where x_t is the input series, max(a) is the maximum of the whole a_t
+# column, and adstock, alpha, gamma are each in [0.1, 0.9].
+
+def geometric_adstock_vec(x: np.ndarray, adstock: float) -> np.ndarray:
+    """a_t = x_t + adstock * a_{t-1}, with a_0 = x_0 (inputs clamped >= 0)."""
+    x = np.maximum(np.asarray(x, dtype=float), 0.0)
+    if x.size == 0:
+        return x
+    return lfilter([1.0], [1.0, -float(adstock)], x)
+
+
+def hill_adstock_vec(x: np.ndarray, adstock: float, alpha: float,
+                      gamma: float) -> np.ndarray:
+    a = geometric_adstock_vec(x, adstock)
+    if a.size == 0:
+        return a
+    half_sat = float(gamma) * float(a.max())
+    a_alpha = a ** alpha
+    return a_alpha / (a_alpha + half_sat ** alpha + 1e-30)
+
+
+def hill_adstock_response_curve(x_grid: np.ndarray, series: np.ndarray,
+                                 adstock: float, alpha: float,
+                                 gamma: float) -> np.ndarray:
+    """Response of the Hill-with-adstock transform at steady spend levels
+    `x_grid`: a = x / (1 - adstock) (the level a_t settles at if x is held
+    constant), with the half-saturation anchored to max(a) of the channel's
+    ACTUAL historical series — same gamma·max(a) the model fitted with."""
+    a_hist_max = float(geometric_adstock_vec(series, adstock).max())
+    a = np.maximum(np.asarray(x_grid, dtype=float), 0.0) / (1.0 - float(adstock))
+    half_sat = float(gamma) * a_hist_max
+    a_alpha = a ** alpha
+    return a_alpha / (a_alpha + half_sat ** alpha + 1e-30)
 
 
 # ── Power transformation ────────────────────────────────────────────────────
@@ -118,12 +163,15 @@ def _adstock(series: pd.Series, adstock_type: str, params_dict: dict,
 
 
 def apply_transformation(x: np.ndarray, transform_type: str,
-                          n: float, S: float = 1.0) -> np.ndarray:
+                          n: float, S: float = 1.0,
+                          adstock: float = 0.5) -> np.ndarray:
     """
-    Apply either 'power' or 'hill' transformation to array x.
+    Apply either 'power' or 'hill' transformation to the time-ordered array x.
     For power: returns x^n
-    For hill:  returns x^n / (x^n + S^n)
+    For hill:  a_t = x_t + adstock·a_{t-1};
+               returns a_t^n / (a_t^n + (S · max(a))^n)
+               (here n = alpha, S = gamma, both in [0.1, 0.9])
     """
     if transform_type == "hill":
-        return hill_transform_vec(x, n, S)
+        return hill_adstock_vec(x, adstock, n, S)
     return power_transform_vec(x, n)

@@ -214,6 +214,9 @@ def unpack_theta(theta, g: dict):
     # S_params only used for Hill; present in theta regardless (bounds
     # keep it irrelevant for power — optimizer still needs a slot)
     S_params = theta[idx:idx+N_MEDIA];     idx += N_MEDIA
+    # Hill (new form): n_params = alpha, S_params = gamma, a_params = adstock
+    # — a_t = x_t + adstock·a_{t-1};  hill = a^alpha / (a^alpha + (gamma·max a)^alpha)
+    a_params = theta[idx:idx+N_MEDIA];     idx += N_MEDIA
 
     # ── Intercept effector transformation parameters (ni, Si) ────────
     # Power:  I_t = G0*I_{t-1} + Σ gamma_k * media_k^n_k_intercept
@@ -224,6 +227,7 @@ def unpack_theta(theta, g: dict):
     # so the flat layout stays fixed regardless of which mode is active.
     n_intercept = theta[idx:idx+N_EFFECTORS]; idx += N_EFFECTORS
     S_intercept = theta[idx:idx+N_EFFECTORS]; idx += N_EFFECTORS
+    a_intercept = theta[idx:idx+N_EFFECTORS]; idx += N_EFFECTORS
 
     # ── Adstock parameters ────────────────────────────────────────────
     # N_ADSTOCK now = number of channels ACROSS ALL GROUPS (own media,
@@ -249,11 +253,13 @@ def unpack_theta(theta, g: dict):
     delta_comp = theta[idx:idx+N_COMP]; idx += N_COMP
     n_comp     = theta[idx:idx+N_COMP]; idx += N_COMP
     S_comp     = theta[idx:idx+N_COMP]; idx += N_COMP
+    a_comp     = theta[idx:idx+N_COMP]; idx += N_COMP
 
     # ── Cross-media synergy ───────────────────────────────────────────
     cross_delta = theta[idx:idx+N_CROSS]; idx += N_CROSS
     cross_n     = theta[idx:idx+N_CROSS]; idx += N_CROSS
     cross_S     = theta[idx:idx+N_CROSS]; idx += N_CROSS
+    cross_a     = theta[idx:idx+N_CROSS]; idx += N_CROSS
 
     # ── Price ─────────────────────────────────────────────────────────
     Ls_price    = theta[idx:idx+N_PRICE]; idx += N_PRICE
@@ -267,14 +273,14 @@ def unpack_theta(theta, g: dict):
 
     return dict(
         Ls=Ls, G0=G0, I0=I0, delta=delta, gamma=gamma,
-        n_params=n_params, S_params=S_params,
-        n_intercept=n_intercept, S_intercept=S_intercept,
+        n_params=n_params, S_params=S_params, a_params=a_params,
+        n_intercept=n_intercept, S_intercept=S_intercept, a_intercept=a_intercept,
         adstock_lambda=adstock_lambda,
         adstock_shape=adstock_shape,
         adstock_scale=adstock_scale,
         adstock_n_lags=g["ADSTOCK_N_LAGS"],
-        Ls_comp=Ls_comp, delta_comp=delta_comp, n_comp=n_comp, S_comp=S_comp,
-        cross_delta=cross_delta, cross_n=cross_n, cross_S=cross_S,
+        Ls_comp=Ls_comp, delta_comp=delta_comp, n_comp=n_comp, S_comp=S_comp, a_comp=a_comp,
+        cross_delta=cross_delta, cross_n=cross_n, cross_S=cross_S, cross_a=cross_a,
         delta_own_nonmedia=delta_own_nonmedia, delta_comp_nonmedia=delta_comp_nonmedia,
         Ls_own_nonmedia=Ls_own_nonmedia, Ls_comp_nonmedia=Ls_comp_nonmedia,
         Ls_price=Ls_price, delta_price=delta_price,

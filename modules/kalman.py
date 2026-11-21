@@ -148,7 +148,7 @@ import pandas as pd
 from modules.cochrane_orcutt import quasi_difference_obs
 from modules.transforms import (
     apply_transformation,
-    hill_transform_vec,
+    hill_adstock_vec,
     adstock_weibull_lagged,
     adstock_nerlove_arrow,
     weibull_lag_weights,
@@ -323,9 +323,10 @@ def _build_process_noise(df, g):
 # ── Transformation helper ────────────────────────────────────────────────────
 
 def _transform_media(x: np.ndarray, transform_type: str,
-                     n: float, S: float) -> np.ndarray:
-    """Apply configured transformation to a media array."""
-    return apply_transformation(x, transform_type, n, S)
+                     n: float, S: float, adstock: float = 0.5) -> np.ndarray:
+    """Apply configured transformation to a media array.
+    Hill: a_t = x_t + adstock·a_{t-1}; a^n / (a^n + (S·max a)^n)."""
+    return apply_transformation(x, transform_type, n, S, adstock)
 
 
 # ── Per-equation precompute (shared by single & joint filters) ──────────────
@@ -417,6 +418,7 @@ def _prepare_equation(df, g, params, static_cache=None):
             TRANSFORM_TYPE,
             params["n_params"][i],
             params["S_params"][i],
+            params["a_params"][i],
         )
         for i, c in enumerate(MEDIA_COLS)
     ], axis=1) if MEDIA_COLS else np.zeros((T_len, 0))
@@ -426,9 +428,9 @@ def _prepare_equation(df, g, params, static_cache=None):
     # double count it, same as own media). Weibull mode keeps Hill-on-
     # adstocked, since there the weighted-lag series IS the delay model.
     transformed_comp = np.stack([
-        hill_transform_vec(
+        hill_adstock_vec(
             (adstocked_media[c] if ADSTOCK_MAP.get(c) == "weibull" else df[c].values.astype(float)),
-            params["n_comp"][j], params["S_comp"][j])
+            params["a_comp"][j], params["n_comp"][j], params["S_comp"][j])
         for j, c in enumerate(COMP_MEDIA_COLS)
     ], axis=1) if COMP_MEDIA_COLS else np.zeros((T_len, 0))
 
@@ -440,8 +442,8 @@ def _prepare_equation(df, g, params, static_cache=None):
     transformed_cross = np.zeros((T_len, N_CROSS))
     for k, (tgt, src) in enumerate(CROSS_MEDIA_PAIRS):
         src_series = adstocked_media[src] if ADSTOCK_MAP.get(src) == "weibull" else df[src].values.astype(float)
-        transformed_cross[:, k] = hill_transform_vec(
-            src_series, params["cross_n"][k], params["cross_S"][k])
+        transformed_cross[:, k] = hill_adstock_vec(
+            src_series, params["cross_a"][k], params["cross_n"][k], params["cross_S"][k])
 
     # Intercept boosts — Power or Hill per INTERCEPT_TRANSFORM_TYPE (set
     # independently of the media betas' own TRANSFORM_TYPE above):
@@ -458,9 +460,10 @@ def _prepare_equation(df, g, params, static_cache=None):
             continue
         ni_int = params["n_intercept"][k]
         si_int = params["S_intercept"][k]
+        ai_int = params["a_intercept"][k]
         raw = df[col].values.astype(float)
         intercept_boost += params["gamma"][k] * _transform_media(
-            raw, INTERCEPT_TRANSFORM_TYPE, ni_int, si_int)
+            raw, INTERCEPT_TRANSFORM_TYPE, ni_int, si_int, ai_int)
 
     # Weibull weighted-lag arrays for state transition — per channel now.
     # A channel on "instant" contributes an all-zero column here (harmless

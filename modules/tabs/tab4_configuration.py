@@ -555,8 +555,9 @@ def render_tab4():
             horizontal=False,
             key="transform_type_radio",
             help=(
-                "**Hill**: f(x) = x^n / (x^n + S^n). "
-                "S-shaped saturation curve — parameters n ∈ [1,15], S > 0.\n\n"
+                "**Hill**: a_t = x_t + adstock·a_(t-1);  "
+                "f = a_t^alpha / (a_t^alpha + (gamma·max(a))^alpha). "
+                "S-shaped saturation curve — adstock, alpha, gamma each ∈ [0.1, 0.9].\n\n"
                 "**Power**: f(x) = x^n. "
                 "Pure diminishing returns — parameter n ∈ (0,1]."
             ),
@@ -575,10 +576,9 @@ def render_tab4():
                 "baseline is shaped.\n\n"
                 "**Power**: γ_k · media_k,t^n_k_intercept. "
                 "Unbounded diminishing-returns curve, n ∈ (0,1].\n\n"
-                "**Hill**: γ_k · media_k,t^n_k_intercept / "
-                "(media_k,t^n_k_intercept + S_k_intercept^n_k_intercept). "
-                "Bounded 0-1 S-curve with its own half-saturation "
-                "S_k_intercept per effector, n ∈ [1,15]."
+                "**Hill**: γ_k · a^alpha / (a^alpha + (gamma_hill·max(a))^alpha), "
+                "with a_t = media_k,t + adstock·a_(t-1). "
+                "Bounded 0-1 S-curve; adstock, alpha, gamma_hill ∈ [0.1, 0.9] per effector."
             ),
         )
         use_hill_intercept = intercept_transform_choice.startswith("Hill")
@@ -800,7 +800,7 @@ def render_tab4():
     # one global choice for all media betas, so the equation shown here is
     # written generically with "adstock(...)" standing in for whichever
     # per-channel choice (Σw_l·x_{t-l} or λ·β_{t-1}) that channel actually uses.
-    transform_label = "Hill(x; n, S)" if use_hill else "x^n"
+    transform_label = "Hill(x; adstock, alpha, gamma)" if use_hill else "x^n"
     transform_type_str = "hill" if use_hill else "power"
     # Legacy global field — kept for old code paths that still read it as a
     # single flag; "weibull" only if every eligible channel is weibull.
@@ -818,14 +818,14 @@ def render_tab4():
         )
         params_text = (
             "Parameters: shape k / scale λ for Weibull channels, λ (decay) for "
-            "Instant channels, plus n" + (", S" if use_hill else "") + " per channel"
+            "Instant channels, plus " + ("adstock, alpha, gamma (Hill)" if use_hill else "n") + " per channel"
         )
     else:
         eq_text = (
             f"β_{{i,t}} = **λ_i · β_{{i,t-1}}** + δ_i · **{f_label}** "
             f"+ Σ_j δ_{{ij}} · {f_label.replace('_{i,t}', '_{j,t}')}"
         )
-        params_text = "Parameters: λ (decay), n" + (", S" if use_hill else "") + " per channel"
+        params_text = "Parameters: λ (decay), " + ("adstock, alpha, gamma (Hill)" if use_hill else "n") + " per channel"
 
     st.info(f"**Active state equation:** {eq_text}\n\n*{params_text}*")
 
@@ -833,7 +833,7 @@ def render_tab4():
     if use_hill_intercept:
         intercept_eq_text = (
             f"I_t = {_intercept_lead} + Σ_k γ_k · "
-            "media_k,t^{n_k} / (media_k,t^{n_k} + S_k^{n_k})   *(Hill)*"
+            "a_k,t^{α_k} / (a_k,t^{α_k} + (γ_k·max a_k)^{α_k}),  a_k,t = media_k,t + adstock_k·a_k,t-1   *(Hill)*"
         )
     else:
         intercept_eq_text = (
@@ -909,7 +909,7 @@ def render_tab4():
             "Non-media effectors boost the intercept through the same "
             f"<b>{'Hill' if use_hill_intercept else 'Power'}</b> intercept transform "
             "as media effectors, each with its own independently-fitted "
-            "n_intercept" + (" and S_intercept" if use_hill_intercept else "") + "."
+            "n_intercept" + (", S_intercept and a_intercept" if use_hill_intercept else "") + "."
         )
 
     # Intercept effectors for Dep 2 — independent selection
