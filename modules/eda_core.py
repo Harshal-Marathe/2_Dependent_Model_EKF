@@ -1,5 +1,6 @@
 """
 EDA core logic (no Streamlit imports) — categorisation, vintage periods,
+yearly aggregation and summary statistics.
 
 Kept separate from the UI so it can be tested on its own.
 
