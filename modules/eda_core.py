@@ -155,6 +155,13 @@ def assign_vintage(dates: pd.Series, start_month: pd.Timestamp) -> pd.Series:
     return vint.where(months_from_start >= 0)
 
 
+def fy_label(w_start: pd.Timestamp, w_last: pd.Timestamp) -> str:
+    """'FY22-23' for a window spanning two calendar years, 'CY22' for Jan-Dec."""
+    if w_start.year == w_last.year:
+        return f"CY{w_start:%y}"
+    return f"FY{w_start:%y}-{w_last:%y}"
+
+
 def vintage_table(dates: pd.Series, start_month: pd.Timestamp, granularity: str) -> pd.DataFrame:
     """One row per vintage year with window, observation count and completeness."""
     v = assign_vintage(dates, start_month)
@@ -163,7 +170,7 @@ def vintage_table(dates: pd.Series, start_month: pd.Timestamp, granularity: str)
     step = pd.Timedelta(days=_STEP_DAYS[granularity])
     rows = []
     if v.notna().sum() == 0:
-        return pd.DataFrame(columns=["Vintage", "Label", "Window start", "Window end",
+        return pd.DataFrame(columns=["Vintage", "Label", "Window", "Window start", "Window end",
                                      "Observations", "Expected", "Complete"])
     for k in range(1, int(v.max()) + 1):
         w_start = start_month + pd.DateOffset(months=12 * (k - 1))
@@ -171,10 +178,12 @@ def vintage_table(dates: pd.Series, start_month: pd.Timestamp, granularity: str)
         n = int((v == k).sum())
         covers_end = max_d >= (w_end - step)
         covers_start = (k > 1) or (min_d is not None and min_d <= w_start + step)
+        w_last = w_end - pd.DateOffset(days=1)
         rows.append({
             "Vintage": k,
-            "Label": f"Y{k} ({w_start:%b-%y} – {(w_end - pd.DateOffset(days=1)):%b-%y})",
-            "Window start": w_start, "Window end": w_end - pd.DateOffset(days=1),
+            "Label": fy_label(w_start, w_last),
+            "Window": f"{w_start:%b-%y} – {w_last:%b-%y}",
+            "Window start": w_start, "Window end": w_last,
             "Observations": n,
             "Expected": EXPECTED_PERIODS[granularity],
             "Complete": bool(covers_end and covers_start and n > 0),
@@ -281,3 +290,78 @@ def build_category_tables(df: pd.DataFrame, variables, vint: pd.Series, vt: pd.D
         g_rows.append({"Variable": var, **{labels[k]: yy.get(k, np.nan) for k in sorted(use_years)}})
 
     return pd.DataFrame(s_rows), pd.DataFrame(y_rows), pd.DataFrame(g_rows)
+
+
+# ────────────────────────────────────────────────────────────────────
+# Trend / seasonality decomposition (STL)
+# ────────────────────────────────────────────────────────────────────
+DEFAULT_SEASONAL_PERIOD = {"Monthly": 12, "Weekly": 52, "Daily": 7}
+
+
+def decompose(series: pd.Series, period: int):
+    """
+    STL decomposition (robust). Returns dict with trend / seasonal / resid
+    Series plus the Wang-Smith-Hyndman strengths:
+        trend strength       = max(0, 1 - Var(R) / Var(T + R))
+        seasonality strength = max(0, 1 - Var(R) / Var(S + R))
+    Returns None if there are fewer than 2 full seasonal cycles, statsmodels
+    is missing, or the series is constant.
+    """
+    try:
+        from statsmodels.tsa.seasonal import STL
+    except Exception:
+        return None
+    y = pd.to_numeric(series, errors="coerce")
+    y = y.interpolate(limit_direction="both")
+    if period < 2 or len(y) < 2 * period or y.nunique() < 3 or y.isna().any():
+        return None
+    try:
+        res = STL(y.values, period=int(period), robust=True).fit()
+    except Exception:
+        return None
+    tr = pd.Series(res.trend, index=series.index)
+    se = pd.Series(res.seasonal, index=series.index)
+    rs = pd.Series(res.resid, index=series.index)
+
+    def _strength(comp):
+        denom = (comp + rs).var()
+        return float(max(0.0, 1 - rs.var() / denom)) if denom > 0 else np.nan
+
+    return {"observed": y, "trend": tr, "seasonal": se, "resid": rs,
+            "trend_strength": _strength(tr), "seasonal_strength": _strength(se)}
+
+
+# ────────────────────────────────────────────────────────────────────
+# Data quality
+# ────────────────────────────────────────────────────────────────────
+def data_quality_table(df: pd.DataFrame, cols, vint: pd.Series) -> pd.DataFrame:
+    rows = []
+    for c in cols:
+        s = pd.to_numeric(df[c], errors="coerce")[vint.notna()]
+        n = len(s)
+        miss = int(s.isna().sum())
+        zero = int((s == 0).sum())
+        neg = int((s < 0).sum())
+        sd = s.std()
+        outl = int(((s - s.mean()).abs() > 3 * sd).sum()) if sd and not np.isnan(sd) else 0
+        rows.append({
+            "Variable": c, "Count": int(s.count()), "Missing": miss,
+            "Missing %": round(miss / n * 100, 1) if n else np.nan,
+            "Zero Count": zero, "Zero %": round(zero / n * 100, 1) if n else np.nan,
+            "Negative": neg, "Outliers (|z|>3)": outl,
+            "Constant": bool(s.nunique(dropna=True) <= 1),
+        })
+    return pd.DataFrame(rows)
+
+
+def date_gap_count(dates: pd.Series, granularity: str) -> int:
+    """Number of missing periods between first and last date."""
+    d = pd.Series(dates).dropna().sort_values().drop_duplicates()
+    if len(d) < 2:
+        return 0
+    if granularity == "Monthly":
+        full = pd.period_range(d.min().to_period("M"), d.max().to_period("M"), freq="M")
+        return int(len(full) - d.dt.to_period("M").nunique())
+    step = 1 if granularity == "Daily" else 7
+    full = (d.max() - d.min()).days // step + 1
+    return int(full - len(d))
