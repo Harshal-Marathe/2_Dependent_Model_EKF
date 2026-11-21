@@ -14,6 +14,7 @@ rainbrain_app/
     ├── state.py                 # st.session_state defaults
     ├── sidebar.py                # Sidebar (branding, step checklist)
     ├── ui_helpers.py             # section()/info()/safe_multiselect() etc.
+    ├── eda_core.py              # EDA logic: categorisation, vintage years, CAGR / growth / YoY
     ├── transforms.py             # Hill saturation + adstock functions
     ├── params.py                 # _make_globals() / unpack_theta()
     ├── kalman.py                  # RBE forward filter + RTS smoother
@@ -23,6 +24,8 @@ rainbrain_app/
     ├── pipeline.py                 # run_full_ekf_pipeline() — ties it all together
     └── tabs/
         ├── tab1_data_upload.py
+        ├── tab_eda.py            # Interactive EDA: vintage setup, categories, per-category + manual windows
+        ├── eda_legacy.py         # Original EDA tools (dep vs indep, spends mix, OLS)
         ├── tab2_prophet.py
         ├── tab3_correlation.py
         ├── tab4_configuration.py
