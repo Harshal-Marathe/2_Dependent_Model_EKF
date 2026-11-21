@@ -25,8 +25,23 @@ from modules.refit import (
 )
 
 
+def _refit_state_is_stale():
+    """True if the refine working copy doesn't belong to the current model:
+    missing, a different target than the fitted config, or a target that is
+    not a column of the current data (e.g. after a new upload / re-fit)."""
+    rc, rr = st.session_state.get("refit_config"), st.session_state.get("refit_result")
+    if rc is None or rr is None:
+        return True
+    cfg, df = st.session_state.get("config") or {}, st.session_state.get("df")
+    if rc.get("target") != cfg.get("target"):
+        return True
+    if df is not None and rc.get("target") not in df.columns:
+        return True
+    return False
+
+
 def _init_refit_state():
-    if st.session_state.get("refit_result") is None:
+    if _refit_state_is_stale():
         st.session_state.refit_config = copy.deepcopy(st.session_state.config)
         st.session_state.refit_result = st.session_state.model_results
         st.session_state.refit_history = [{

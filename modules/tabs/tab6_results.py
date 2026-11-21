@@ -470,6 +470,20 @@ def render_full_results(df, config, res, target, key_prefix="", pcb_key="per_cha
     g = res["g"]
     kp = key_prefix
 
+    # Guard rails — show an actionable message instead of a traceback.
+    if target not in df.columns:
+        st.error(
+            f"The target column `{target}` is not in the current dataset, so these "
+            "results can't be drawn. This usually means the data was replaced after "
+            "the model was fitted, or an older saved workspace was loaded. "
+            "Re-run the model in Tab 5.")
+        return
+    if "a_params" not in res.get("params", {}):
+        st.error(
+            "These results were fitted before the Hill + adstock update and use the old "
+            "parameter layout, so they can't be displayed. Re-run the model in Tab 5.")
+        return
+
     st.markdown("### A · Model Performance")
     c1, c2, c3, c4 = st.columns(4)
     c1.metric("MAPE",         f"{res['mape']:.2%}")

@@ -380,6 +380,214 @@ def _variable_window(label, cat, variables, ctx, cat_by_var, manual=False):
 
 
 # ════════════════════════════════════════════════════════════════════
+# MEDIA window — Impressions/GRP | Spends | All
+# ════════════════════════════════════════════════════════════════════
+C_KPI = "#1f2937"   # dark dotted line for the overlaid sales KPI
+
+
+def _slug(txt):
+    return "".join(ch if ch.isalnum() else "_" for ch in str(txt).lower())
+
+
+def _kpi_overlay_fig(dfw, date_col, series_map, kpi_series, kpi_name, title, height=420,
+                     legend_below=True):
+    """Line chart of one or more media series (left axis) with an optional
+    dotted KPI line on a secondary right axis."""
+    fig = make_subplots(specs=[[{"secondary_y": True}]])
+    for i, (name, y) in enumerate(series_map.items()):
+        fig.add_trace(go.Scatter(x=dfw[date_col], y=y, mode="lines", name=name,
+                                 line=dict(color=(C_LINE if len(series_map) == 1
+                                                  else px.colors.qualitative.Plotly[i % 10]),
+                                           width=2)), secondary_y=False)
+    if kpi_series is not None:
+        fig.add_trace(go.Scatter(x=dfw[date_col], y=kpi_series, mode="lines",
+                                 name=f"{kpi_name} (KPI)",
+                                 line=dict(color=C_KPI, width=2, dash="dot")), secondary_y=True)
+        fig.update_yaxes(title_text=kpi_name, secondary_y=True, showgrid=False)
+    fig.update_yaxes(tickformat="~s", secondary_y=False)
+    return _base_layout(fig, title, height)
+
+
+def _media_group_view(group_label, cols, ctx, kpi_col, k, show_mix=True):
+    """All the charts/tables for one set of media channels."""
+    df, date_col, vint, vt = ctx["df"], ctx["date_col"], ctx["vint"], ctx["vt"]
+    dfw = df[vint.notna()].reset_index(drop=True)
+    kpi_w = pd.to_numeric(dfw[kpi_col], errors="coerce") if kpi_col else None
+    unit_noun = {"Spends": "spend", "Impressions/GRP": "activity"}.get(group_label, "spend / activity")
+
+    # ── 1 · focus chart ─────────────────────────────────────────
+    fc1, fc2 = st.columns([5, 1.4])
+    focus = fc1.selectbox("Select a variable to view", cols, key=f"{k}_focus")
+    ov1 = fc2.checkbox("Overlay sales (KPI)", value=bool(kpi_col), key=f"{k}_ov_focus",
+                       disabled=not kpi_col)
+    st.plotly_chart(
+        _kpi_overlay_fig(dfw, date_col, {focus: pd.to_numeric(dfw[focus], errors="coerce")},
+                         kpi_w if (ov1 and kpi_col) else None, kpi_col,
+                         f"Focus — {focus}", 400),
+        use_container_width=True, key=f"{k}_focus_fig")
+
+    # ── 2 · channels to plot together ───────────────────────────
+    mc1, mc2 = st.columns([5, 1.4])
+    picked = safe_multiselect("Channels to plot together", options=cols,
+                                             default=cols, key=f"{k}_multi")
+    ov2 = mc2.checkbox("Overlay sales (KPI)", value=False, key=f"{k}_ov_multi",
+                       disabled=not kpi_col)
+    if picked:
+        st.plotly_chart(
+            _kpi_overlay_fig(dfw, date_col,
+                             {c: pd.to_numeric(dfw[c], errors="coerce") for c in picked},
+                             kpi_w if (ov2 and kpi_col) else None, kpi_col,
+                             f"Media {unit_noun} trend", 460),
+            use_container_width=True, key=f"{k}_multi_fig")
+    else:
+        st.info("Select at least one channel to plot.")
+
+    # ── 3 · tables ──────────────────────────────────────────────
+    share_df = core.media_share_corr_table(df, cols, vint, kpi_col)
+    nz_df = core.media_nonzero_stats(df, cols, vint)
+
+    t1, t2 = st.columns(2)
+    with t1:
+        _heading("Share % & correlation with sales")
+        show_share = share_df if show_mix else share_df.drop(columns=["Share %"])
+        st.dataframe(show_share, use_container_width=True, hide_index=True,
+                     height=min(38 * (len(show_share) + 1) + 3, 420))
+        st.download_button("⬇ EXPORT CSV", show_share.to_csv(index=False).encode(),
+                           f"media_share_corr_{_slug(group_label)}.csv", "text/csv",
+                           key=f"{k}_dl_share")
+    with t2:
+        _heading("Non-zero statistics")
+        nz_show = nz_df.copy()
+        for c in ("Non-zero Min", "Non-zero Avg", "Non-zero Max"):
+            nz_show[c] = nz_show[c].round(2)
+        st.dataframe(nz_show, use_container_width=True, hide_index=True,
+                     height=min(38 * (len(nz_show) + 1) + 3, 420))
+        st.download_button("⬇ EXPORT CSV", nz_df.to_csv(index=False).encode(),
+                           f"media_nonzero_{_slug(group_label)}.csv", "text/csv",
+                           key=f"{k}_dl_nz")
+
+    if not show_mix:
+        st.caption("Share, concentration and yearly mix are only meaningful within one unit — "
+                   "open the **Impressions/GRP** or **Spends** tab for those.")
+        return
+
+    # ── 4 · share donut ─────────────────────────────────────────
+    sd = share_df[share_df["Share %"].fillna(0) > 0]
+    if len(sd):
+        fig = go.Figure(go.Pie(
+            labels=sd["Channel"], values=sd["Share %"], hole=0.55, sort=False,
+            textinfo="percent", textposition="outside",
+            marker=dict(colors=(px.colors.qualitative.Plotly + px.colors.qualitative.Set3)
+                        [:len(sd)]),
+            hovertemplate="%{label}<br>%{value:.2f}%<extra></extra>"))
+        fig.update_layout(legend=dict(orientation="v", x=1.02, y=0.5), showlegend=True)
+        st.plotly_chart(_base_layout(fig, f"Share of {unit_noun}", 460),
+                        use_container_width=True, key=f"{k}_donut")
+
+    # ── 5 · year-wise mix ───────────────────────────────────────
+    mix = core.media_yearly_mix(df, cols, vint, vt)
+    if len(mix):
+        fig = go.Figure()
+        for i, c in enumerate(cols):
+            fig.add_trace(go.Bar(x=mix.index, y=mix[c], name=c,
+                                 marker_color=(px.colors.qualitative.Plotly +
+                                               px.colors.qualitative.Set3)[i % 22]))
+        fig.update_layout(barmode="stack", bargap=0.35)
+        fig.update_yaxes(tickformat="~s")
+        st.plotly_chart(_base_layout(fig, f"Year-wise {unit_noun} mix", 480),
+                        use_container_width=True, key=f"{k}_mix")
+        if any(str(i).endswith("*") for i in mix.index):
+            st.caption("* = incomplete vintage year (partial data).")
+
+    # ── 6 · concentration + signal cards ────────────────────────
+    with st.expander("⚙️ Signal rules (adjust how channels are flagged)", expanded=False):
+        r1, r2, r3 = st.columns(3)
+        min_share = r1.number_input("Min share %", 0.0, 100.0, 1.0, 0.5, key=f"{k}_r_share")
+        min_cov = r2.number_input("Min % of periods active", 0.0, 100.0, 25.0, 5.0,
+                                  key=f"{k}_r_cov")
+        min_corr = r3.number_input("Min |corr with sales|", 0.0, 1.0, 0.05, 0.01,
+                                   key=f"{k}_r_corr")
+    sig = core.classify_media_signal(share_df, nz_df, min_share, min_cov, min_corr)
+    hhi = core.concentration_hhi(share_df["Share %"])
+    n_rec = int((sig["Signal"] == "Recommended").sum())
+    n_weak = int((sig["Signal"] == "Weak signal").sum())
+
+    c1, c2, c3 = st.columns(3)
+    _kpi(c1, "Concentration (HHI)", _fmt_num(hhi))
+    _kpi(c2, "Recommended in", n_rec)
+    _kpi(c3, "Weak signal", n_weak)
+    st.caption("HHI = Σ share² (1/N = perfectly even, 1 = a single channel). A channel is a "
+               "weak signal if its share, its coverage (% of periods active) or its absolute "
+               "correlation with sales falls under the thresholds above.")
+
+    with st.expander("Channel signal detail", expanded=False):
+        st.dataframe(sig, use_container_width=True, hide_index=True)
+        st.download_button("⬇ EXPORT CSV", sig.to_csv(index=False).encode(),
+                           f"media_signal_{_slug(group_label)}.csv", "text/csv",
+                           key=f"{k}_dl_sig")
+
+    with st.expander("💡 Insight", expanded=False):
+        for line in core.media_insights(share_df, sig, hhi, mix, kpi_col):
+            st.markdown(f"- {line}")
+        st.caption("Rule-based summary computed from the tables above (no AI model involved).")
+
+
+def _media_window(media_vars, ctx, cat_by_var):
+    if not media_vars:
+        st.info("No variables are assigned to **Media**. Assign some in "
+                "*2 · Variable categories* above.")
+        return
+
+    # KPI used for the overlay and the correlation column
+    sales_vars = [v for v in ctx["numeric_cols"] if cat_by_var.get(v) == "Sales"]
+    cfg_target = (st.session_state.get("config") or {}).get("target")
+    kpi_opts = sales_vars or [v for v in ctx["numeric_cols"] if v not in media_vars]
+    kpi_default = kpi_opts.index(cfg_target) if cfg_target in kpi_opts else 0
+    kpi_col = st.selectbox("Sales / KPI (for overlay & correlation)", kpi_opts,
+                           index=kpi_default if kpi_opts else None,
+                           key="eda_media_kpi") if kpi_opts else None
+
+    # unit type per channel (auto from the name, editable)
+    sig_key = tuple(media_vars)
+    if st.session_state.get("_eda_media_unit_sig") != sig_key:
+        st.session_state["_eda_media_unit_sig"] = sig_key
+        st.session_state["_eda_media_unit_base"] = pd.DataFrame({
+            "Variable": media_vars, "Unit": [core.media_unit_type(v) for v in media_vars]})
+        st.session_state.pop("eda_media_unit_editor", None)
+    with st.expander("🏷️ Channel unit type (Impressions/GRP vs Spends)", expanded=False):
+        st.caption("Auto-detected from the column name (spend / cost → Spends). "
+                   "Edit any row if a channel is mis-sorted.")
+        ed = st.data_editor(
+            st.session_state["_eda_media_unit_base"], key="eda_media_unit_editor",
+            hide_index=True, use_container_width=True, disabled=["Variable"],
+            column_config={"Unit": st.column_config.SelectboxColumn(
+                "Unit", options=[core.UNIT_IMPR, core.UNIT_SPENDS], required=True)})
+    unit_of = dict(zip(ed["Variable"], ed["Unit"]))
+    impr = [v for v in media_vars if unit_of.get(v) == core.UNIT_IMPR]
+    spnd = [v for v in media_vars if unit_of.get(v) == core.UNIT_SPENDS]
+
+    t_all, t_imp, t_sp = st.tabs(["ALL", "IMPRESSIONS/GRP", "SPENDS"])
+    with t_all:
+        _media_group_view("All", media_vars, ctx, kpi_col, "eda_media_all", show_mix=False)
+    with t_imp:
+        if impr:
+            _media_group_view(core.UNIT_IMPR, impr, ctx, kpi_col, "eda_media_impr")
+        else:
+            st.info("No Impressions/GRP channels detected.")
+    with t_sp:
+        if spnd:
+            _media_group_view(core.UNIT_SPENDS, spnd, ctx, kpi_col, "eda_media_spend")
+        else:
+            st.info("No Spends channels detected. If some channels are spends, mark them in "
+                    "*Channel unit type* above.")
+
+    with st.expander("📋 Yearly growth dashboard (CAGR, YoY, seasonality) for each channel",
+                     expanded=False):
+        _variable_window("Media", "Media", media_vars, ctx, cat_by_var)
+
+
+
+# ════════════════════════════════════════════════════════════════════
 # Data-quality window
 # ════════════════════════════════════════════════════════════════════
 def _data_quality_window(ctx, cat_by_var):
@@ -610,6 +818,9 @@ def render_tab_eda():
                 _correlation_window(ctx, cat_by_var)
             elif w == "MANUAL EDA":
                 _variable_window("Manual", None, [], ctx, cat_by_var, manual=True)
+            elif w == "MEDIA":
+                _media_window([v for v in numeric_cols if cat_by_var.get(v) == "Media"],
+                              ctx, cat_by_var)
             else:
                 vars_in = [v for v in numeric_cols if cat_by_var.get(v) == cat]
                 _variable_window(w, cat, vars_in, ctx, cat_by_var)

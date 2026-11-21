@@ -365,3 +365,145 @@ def date_gap_count(dates: pd.Series, granularity: str) -> int:
     step = 1 if granularity == "Daily" else 7
     full = (d.max() - d.min()).days // step + 1
     return int(full - len(d))
+
+
+# ────────────────────────────────────────────────────────────────────
+# Media window — share / correlation / non-zero stats / mix / signal
+# ────────────────────────────────────────────────────────────────────
+UNIT_SPENDS = "Spends"
+UNIT_IMPR = "Impressions/GRP"
+_SPEND_WORDS = ("spend", "cost", "investment", "budget", "expense")
+
+
+def media_unit_type(col: str) -> str:
+    """'Spends' if the name says spend/cost/etc., else 'Impressions/GRP'."""
+    low = str(col).lower()
+    return UNIT_SPENDS if any(w in low for w in _SPEND_WORDS) else UNIT_IMPR
+
+
+def _window_numeric(df: pd.DataFrame, col: str, vint: pd.Series) -> pd.Series:
+    return pd.to_numeric(df[col], errors="coerce")[vint.notna()]
+
+
+def media_share_corr_table(df, cols, vint, kpi_col=None) -> pd.DataFrame:
+    """Channel | Share % | Corr with sales — sorted by share, largest first.
+    Share = channel total / sum of all listed channels' totals (window rows
+    only). Corr = Pearson vs the KPI over the same rows (NaN if constant)."""
+    kpi = _window_numeric(df, kpi_col, vint) if kpi_col else None
+    totals = {c: _window_numeric(df, c, vint).sum() for c in cols}
+    grand = sum(totals.values())
+    rows = []
+    for c in cols:
+        s = _window_numeric(df, c, vint)
+        corr = np.nan
+        if kpi is not None and s.nunique(dropna=True) > 1 and kpi.nunique(dropna=True) > 1:
+            corr = s.corr(kpi)
+        rows.append({
+            "Channel": c,
+            "Share %": round(totals[c] / grand * 100, 2) if grand else np.nan,
+            "Corr with sales": round(corr, 4) if pd.notna(corr) else np.nan,
+        })
+    out = pd.DataFrame(rows, columns=["Channel", "Share %", "Corr with sales"])
+    return out.sort_values("Share %", ascending=False, ignore_index=True)
+
+
+def media_nonzero_stats(df, cols, vint) -> pd.DataFrame:
+    """Channel | Non-zero Min / Avg / Max | Non-zero periods | Zero periods | % non-zero."""
+    rows = []
+    for c in cols:
+        s = _window_numeric(df, c, vint)
+        nz = s[s.fillna(0) != 0]
+        n = int(s.count())
+        rows.append({
+            "Channel": c,
+            "Non-zero Min": nz.min() if len(nz) else np.nan,
+            "Non-zero Avg": nz.mean() if len(nz) else np.nan,
+            "Non-zero Max": nz.max() if len(nz) else np.nan,
+            "Non-zero Periods": int(len(nz)),
+            "Zero Periods": n - int(len(nz)),
+            "% Non-zero": round(len(nz) / n * 100, 1) if n else np.nan,
+        })
+    return pd.DataFrame(rows)
+
+
+def concentration_hhi(share_pct) -> float:
+    """Herfindahl–Hirschman index on shares (0–1). 1/N = perfectly even, 1 = one channel."""
+    s = pd.Series(share_pct, dtype=float).dropna() / 100.0
+    return float((s ** 2).sum()) if len(s) else np.nan
+
+
+def classify_media_signal(share_df: pd.DataFrame, nz_df: pd.DataFrame,
+                          min_share: float = 1.0, min_coverage: float = 25.0,
+                          min_abs_corr: float = 0.05) -> pd.DataFrame:
+    """Per channel: 'Recommended' or 'Weak signal' + the reasons. A channel is
+    weak when ANY rule trips: share < min_share %, non-zero coverage <
+    min_coverage % of periods, or |corr with sales| < min_abs_corr
+    (an unavailable correlation does not count against a channel)."""
+    m = share_df.merge(nz_df[["Channel", "% Non-zero"]], on="Channel", how="left")
+    status, why = [], []
+    for _, r in m.iterrows():
+        reasons = []
+        if pd.notna(r["Share %"]) and r["Share %"] < min_share:
+            reasons.append(f"share {r['Share %']:.2f}% < {min_share:g}%")
+        if pd.notna(r["% Non-zero"]) and r["% Non-zero"] < min_coverage:
+            reasons.append(f"active in {r['% Non-zero']:.0f}% of periods < {min_coverage:g}%")
+        if pd.notna(r["Corr with sales"]) and abs(r["Corr with sales"]) < min_abs_corr:
+            reasons.append(f"|corr| {abs(r['Corr with sales']):.3f} < {min_abs_corr:g}")
+        status.append("Weak signal" if reasons else "Recommended")
+        why.append("; ".join(reasons))
+    m["Signal"] = status
+    m["Reason"] = why
+    return m[["Channel", "Share %", "Corr with sales", "% Non-zero", "Signal", "Reason"]]
+
+
+def media_yearly_mix(df, cols, vint, vt) -> pd.DataFrame:
+    """Rows = vintage labels (partial years get a trailing '*'), columns = channels, values = yearly sum."""
+    rows = {}
+    for _, v in vt.iterrows():
+        k = int(v["Vintage"])
+        label = v["Label"] + ("" if v["Complete"] else "*")
+        rows[label] = {c: pd.to_numeric(df[c], errors="coerce")[vint == k].sum() for c in cols}
+    return pd.DataFrame(rows).T[list(cols)] if rows else pd.DataFrame(columns=list(cols))
+
+
+def media_insights(share_df, signal_df, hhi, mix_df, kpi_name=None) -> list:
+    """Short, rule-based observations (deterministic — no model involved)."""
+    out = []
+    if len(share_df):
+        top = share_df.head(3)
+        out.append("Top channels by share: " + ", ".join(
+            f"{ch} ({sh:.1f}%)" for ch, sh in zip(top["Channel"], top["Share %"])) +
+            f" — together {top['Share %'].sum():.1f}% of the total.")
+    if pd.notna(hhi):
+        n = max(len(share_df), 1)
+        # Judge against an even split (1/N), not an absolute cut-off — with
+        # few channels a high raw HHI is unavoidable.
+        norm = (hhi - 1 / n) / (1 - 1 / n) if n > 1 else np.nan
+        level = ("" if pd.isna(norm) else
+                 " — highly concentrated" if norm > 0.35 else
+                 " — moderately concentrated" if norm > 0.15 else " — fairly evenly spread")
+        out.append(f"Concentration (HHI) is {hhi:.2f} across {n} channels "
+                   f"(an even split would be {1 / n:.2f}){level}.")
+    c = share_df.dropna(subset=["Corr with sales"])
+    if kpi_name and len(c):
+        hi, lo = c.loc[c["Corr with sales"].idxmax()], c.loc[c["Corr with sales"].idxmin()]
+        out.append(f"Strongest positive correlation with {kpi_name}: {hi['Channel']} "
+                   f"({hi['Corr with sales']:+.2f}); most negative: {lo['Channel']} "
+                   f"({lo['Corr with sales']:+.2f}). Correlation is not causation — use it as a "
+                   f"screening signal, not a verdict.")
+    weak = signal_df[signal_df["Signal"] == "Weak signal"]
+    if len(weak):
+        out.append(f"{len(weak)} of {len(signal_df)} channels show a weak signal "
+                   f"({', '.join(weak['Channel'].head(5))}{'…' if len(weak) > 5 else ''}) — "
+                   f"consider merging, dropping or constraining them in the model.")
+    if len(mix_df) >= 2:
+        full = mix_df[[not str(i).endswith("*") for i in mix_df.index]]
+        if len(full) >= 2:           # compare complete years only when possible
+            mix_df = full
+        sh = mix_df.div(mix_df.sum(axis=1).replace(0, np.nan), axis=0) * 100
+        d = (sh.iloc[-1] - sh.iloc[0]).dropna()
+        if len(d):
+            up, dn = d.idxmax(), d.idxmin()
+            out.append(f"Mix shift {sh.index[0]} → {sh.index[-1]}: biggest gainer {up} "
+                       f"({d[up]:+.1f} pp), biggest loser {dn} ({d[dn]:+.1f} pp).")
+    return out

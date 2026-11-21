@@ -234,6 +234,13 @@ def render_tab5(nevergrad_available: bool):
                 st.session_state.model_fitted    = True
                 st.session_state.model_results_2 = results_2
                 st.session_state.model_fitted_2  = results_2 is not None
+                # A fresh fit replaces the model — the Tab 8 (Refine) working
+                # copy was started from the OLD fit/config and must be rebuilt
+                # from this one, otherwise Tab 8 keeps showing stale results
+                # (or a stale target that may not even exist in the data).
+                st.session_state.refit_config  = None
+                st.session_state.refit_result  = None
+                st.session_state.refit_history = []
 
                 st.success("✅ Model fitted!")
                 st.markdown(f"#### Dependent 1 · `{config['target']}`")
