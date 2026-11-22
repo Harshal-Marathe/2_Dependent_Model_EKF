@@ -183,9 +183,26 @@ def render_tab2(prophet_available: bool, holidays_available: bool):
                 except Exception as e:
                     st.error(f"Prophet error: {e}")
 
+    if st.session_state.pop("_prophet_stale", False):
+        st.warning("The saved Prophet results didn't match the current dataset "
+                   "(their target/date column is not in the data), so they were cleared. "
+                   "Pick the columns and click the run button again.")
+
     if st.session_state.prophet_results:
         pr = st.session_state.prophet_results
         fc = pr["forecast"]; df_p = pr["df_prophet"]
+        # Everything below must use the columns Prophet was actually FITTED on
+        # (stored in the results), not whatever the selectboxes say right now —
+        # otherwise changing the selection, uploading a new file or loading a
+        # saved workspace makes df_p[p_target] raise a KeyError.
+        p_target = pr.get("target_col", p_target)
+        p_date   = pr.get("date_col", p_date)
+        if (p_target not in df_p.columns or p_date not in df_p.columns
+                or st.session_state.df is None
+                or p_date not in st.session_state.df.columns):
+            st.session_state.prophet_results = None
+            st.session_state["_prophet_stale"] = True
+            st.rerun()
 
         c1, c2, c3 = st.columns(3)
         c1.metric("Observed mean", f"{df_p[p_target].mean():,.2f}")
