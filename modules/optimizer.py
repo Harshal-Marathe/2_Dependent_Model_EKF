@@ -9,6 +9,31 @@ import streamlit as st
 from concurrent.futures import ThreadPoolExecutor
 
 from modules.params import unpack_theta
+
+
+def _patch_nevergrad_metamodel():
+    """Compatibility shim: nevergrad 1.0.x's MetaModel (also used internally by
+    NGOpt and other 'portfolio' strategies) calls float(model.predict(...)) on
+    a shape-(1,) array. NumPy >= 2.5 no longer allows float() on an array that
+    isn't 0-dimensional, which crashes the optimiser with
+    'only 0-dimensional arrays can be converted to Python scalars'.
+    Shadowing `float` inside nevergrad's metamodel module only (builtins and
+    every other module are untouched) restores the intended behaviour."""
+    try:
+        import nevergrad.optimization.metamodel as _mm
+    except Exception:
+        return
+
+    def _scalar_float(x):
+        try:
+            return float(x)
+        except TypeError:
+            return float(np.asarray(x, dtype=float).reshape(-1)[0])
+
+    _mm.float = _scalar_float
+
+
+_patch_nevergrad_metamodel()
 from modules.bounds import build_normalized_problem
 from modules.kalman import (
     run_kalman_filter, run_bivariate_kalman_filter, build_static_cache,
