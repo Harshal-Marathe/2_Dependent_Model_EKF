@@ -32,7 +32,7 @@ def hill_transform(x: float, n: float, S: float) -> float:
 #   hill  = a_t^alpha / ( a_t^alpha + (gamma · max(a))^alpha )
 #
 # where x_t is the input series, max(a) is the maximum of the whole a_t
-# column, and adstock, alpha, gamma are each in [0.1, 0.9].
+# column. adstock and gamma are in [0.1, 0.9]; alpha is in [0.5, 3.0].
 
 def geometric_adstock_vec(x: np.ndarray, adstock: float) -> np.ndarray:
     """a_t = x_t + adstock * a_{t-1}, with a_0 = x_0 (inputs clamped >= 0)."""
@@ -170,7 +170,7 @@ def apply_transformation(x: np.ndarray, transform_type: str,
     For power: returns x^n
     For hill:  a_t = x_t + adstock·a_{t-1};
                returns a_t^n / (a_t^n + (S · max(a))^n)
-               (here n = alpha, S = gamma, both in [0.1, 0.9])
+               (here n = alpha in [0.5, 3.0], S = gamma in [0.1, 0.9])
     """
     if transform_type == "hill":
         return hill_adstock_vec(x, adstock, n, S)

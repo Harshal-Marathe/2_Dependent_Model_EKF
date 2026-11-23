@@ -114,13 +114,13 @@ def render_per_channel_bounds(channel_cols, comp_cols, key_prefix, df,
                     bounds[col]["hill_adstock"] = (ha_lo, ha_hi)
                     st.divider()
 
-                    st.markdown("**Hill Alpha** — steepness of the S-curve  (range 0.1 – 0.9)")
+                    st.markdown("**Hill Alpha** — curve shape; above 1 gives an S-curve  (range 0.5 – 3.0)")
                     hnc1, hnc2 = st.columns(2)
                     with hnc1:
-                        hn_lo = st.number_input("alpha min", 0.1, 0.9, 0.1, 0.05,
+                        hn_lo = st.number_input("alpha min", 0.5, 3.0, 0.5, 0.1,
                                                  key=f"{key_prefix}hn_lo_{col}")
                     with hnc2:
-                        hn_hi = st.number_input("alpha max", 0.1, 0.9, 0.9, 0.05,
+                        hn_hi = st.number_input("alpha max", 0.5, 3.0, 3.0, 0.1,
                                                  key=f"{key_prefix}hn_hi_{col}")
                     bounds[col]["hill_n"] = (hn_lo, hn_hi)
                     st.divider()

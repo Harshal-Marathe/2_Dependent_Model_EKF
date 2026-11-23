@@ -28,16 +28,18 @@ def _build_theta0_and_bounds(df, g):
     # Hill (adstock · alpha · gamma) parameters are always confined to
     # [0.1, 0.9]; any saved per-channel range (e.g. an old n ∈ [1, 15]) is
     # intersected with it so stale configs can never push them outside.
-    H_LO, H_HI = 0.1, 0.9
-    def _hb(col, param):
-        lo, hi = _b(col, param, H_LO, H_HI)
-        lo = H_LO if lo is None else max(H_LO, min(lo, H_HI))
-        hi = H_HI if hi is None else min(H_HI, max(hi, H_LO))
+    H_LO, H_HI = 0.1, 0.9      # adstock and gamma
+    A_LO, A_HI = 0.5, 3.0      # alpha (>1 allows an S-shaped curve)
+    def _hb(col, param, lim_lo=H_LO, lim_hi=H_HI):
+        lo, hi = _b(col, param, lim_lo, lim_hi)
+        lo = lim_lo if lo is None else max(lim_lo, min(lo, lim_hi))
+        hi = lim_hi if hi is None else min(lim_hi, max(hi, lim_lo))
         if lo > hi:
-            lo, hi = H_LO, H_HI
+            lo, hi = lim_lo, lim_hi
         return (lo, hi)
-    def _mid(b):
-        return float(np.clip(0.5, b[0], b[1]))
+    def _mid(b, start=0.5):
+        return float(np.clip(start, b[0], b[1]))
+    A_START = 1.5              # alpha starting value (inside 0.5–3.0, S-shaped)
 
     # ── Beta persistence ──────────────────────────────────────────────
     ls_bounds = [_b(c, "ls", 0.2, 0.8) for c in MEDIA_COLS]
@@ -97,8 +99,8 @@ def _build_theta0_and_bounds(df, g):
         # Hill with adstock: a_t = x_t + adstock·a_{t-1};
         # hill = a^alpha / (a^alpha + (gamma·max(a))^alpha)
         # alpha (n slot), gamma (S slot), adstock (a slot) — all in [0.1, 0.9]
-        n_bounds = [_hb(c, "hill_n") for c in MEDIA_COLS]
-        n_init   = [_mid(b) for b in n_bounds]
+        n_bounds = [_hb(c, "hill_n", A_LO, A_HI) for c in MEDIA_COLS]
+        n_init   = [_mid(b, A_START) for b in n_bounds]
         S_bounds = [_hb(c, "hill_s") for c in MEDIA_COLS]
         S_init   = [_mid(b) for b in S_bounds]
         a_bounds = [_hb(c, "hill_adstock") for c in MEDIA_COLS]
@@ -118,8 +120,8 @@ def _build_theta0_and_bounds(df, g):
         S_int_init   = [0.5] * N_EFFECTORS
     else:
         # Hill with adstock — mirrors the media Hill bounds above
-        n_int_bounds = [(H_LO, H_HI)] * N_EFFECTORS
-        n_int_init   = [0.5] * N_EFFECTORS
+        n_int_bounds = [(A_LO, A_HI)] * N_EFFECTORS
+        n_int_init   = [A_START] * N_EFFECTORS
         S_int_bounds = [(H_LO, H_HI)] * N_EFFECTORS
         S_int_init   = [0.5] * N_EFFECTORS
     a_int_bounds = [(H_LO, H_HI)] * N_EFFECTORS
@@ -160,7 +162,7 @@ def _build_theta0_and_bounds(df, g):
 
     # ── Competitor media ──────────────────────────────────────────────
     ls_comp_bounds  = [_b(c, "ls",     0.2, 0.8)  for c in COMP_MEDIA_COLS]
-    n_comp_bounds   = [_hb(c, "hill_n")       for c in COMP_MEDIA_COLS]
+    n_comp_bounds   = [_hb(c, "hill_n", A_LO, A_HI) for c in COMP_MEDIA_COLS]
     s_comp_bounds   = [_hb(c, "hill_s")       for c in COMP_MEDIA_COLS]
     a_comp_bounds   = [_hb(c, "hill_adstock") for c in COMP_MEDIA_COLS]
     price_ls_bounds = [_b(c, "ls", 0.2, 0.8) for c in g["PRICE_COLS"]]
@@ -184,13 +186,13 @@ def _build_theta0_and_bounds(df, g):
         np.full(N_COMP_NONMEDIA, -0.01),
         [np.clip(0.5, lo, hi) for lo, hi in ls_comp_bounds] if N_COMP else [],
         np.full(N_COMP, -0.02),   # bound requires (None, 0) — competitor spend must hurt you
-        [_mid(b) for b in n_comp_bounds] if N_COMP else [],
+        [_mid(b, A_START) for b in n_comp_bounds] if N_COMP else [],
         [_mid(b) for b in s_comp_bounds] if N_COMP else [],
         [_mid(b) for b in a_comp_bounds] if N_COMP else [],
         np.full(N_CROSS, 0.02),
-        np.full(N_CROSS, 0.5),
-        np.full(N_CROSS, 0.5),
-        np.full(N_CROSS, 0.5),
+        np.full(N_CROSS, A_START),       # cross_n (alpha)
+        np.full(N_CROSS, 0.5),           # cross_S (gamma)
+        np.full(N_CROSS, 0.5),           # cross_a (adstock)
         [np.clip(0.5, lo, hi) for lo, hi in price_ls_bounds] if N_PRICE else [],
         np.full(N_PRICE, -0.01),
         [0.0] if USE_ORGANIC_DRIFT else [],
@@ -219,7 +221,7 @@ def _build_theta0_and_bounds(df, g):
         s_comp_bounds +
         a_comp_bounds +
         [(0, None)] * N_CROSS +          # cross_delta
-        [(H_LO, H_HI)] * N_CROSS +       # cross_n (alpha)
+        [(A_LO, A_HI)] * N_CROSS +       # cross_n (alpha)
         [(H_LO, H_HI)] * N_CROSS +       # cross_S (gamma)
         [(H_LO, H_HI)] * N_CROSS +       # cross_a (adstock)
         price_ls_bounds +                # Ls_price

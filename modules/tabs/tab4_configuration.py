@@ -557,7 +557,7 @@ def render_tab4():
             help=(
                 "**Hill**: a_t = x_t + adstock·a_(t-1);  "
                 "f = a_t^alpha / (a_t^alpha + (gamma·max(a))^alpha). "
-                "S-shaped saturation curve — adstock, alpha, gamma each ∈ [0.1, 0.9].\n\n"
+                "S-shaped saturation curve — alpha ∈ [0.5, 3.0]; adstock and gamma ∈ [0.1, 0.9].\n\n"
                 "**Power**: f(x) = x^n. "
                 "Pure diminishing returns — parameter n ∈ (0,1]."
             ),
@@ -578,7 +578,7 @@ def render_tab4():
                 "Unbounded diminishing-returns curve, n ∈ (0,1].\n\n"
                 "**Hill**: γ_k · a^alpha / (a^alpha + (gamma_hill·max(a))^alpha), "
                 "with a_t = media_k,t + adstock·a_(t-1). "
-                "Bounded 0-1 S-curve; adstock, alpha, gamma_hill ∈ [0.1, 0.9] per effector."
+                "Bounded 0-1 S-curve; alpha ∈ [0.5, 3.0]; adstock, gamma_hill ∈ [0.1, 0.9] per effector."
             ),
         )
         use_hill_intercept = intercept_transform_choice.startswith("Hill")

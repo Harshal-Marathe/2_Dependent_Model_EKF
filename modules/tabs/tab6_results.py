@@ -471,12 +471,18 @@ def render_full_results(df, config, res, target, key_prefix="", pcb_key="per_cha
     kp = key_prefix
 
     # Guard rails — show an actionable message instead of a traceback.
-    if target not in df.columns:
+    used = [target]
+    for key in ("MEDIA_COLS", "COMP_MEDIA_COLS", "OWN_NONMEDIA_COLS", "COMP_NONMEDIA_COLS",
+                "PRICE_COLS", "DUMMY_COLS", "INTERCEPT_EFFECTORS"):
+        used += list(g.get(key, []) or [])
+    missing = sorted({c for c in used if c not in df.columns})
+    if missing:
         st.error(
-            f"The target column `{target}` is not in the current dataset, so these "
-            "results can't be drawn. This usually means the data was replaced after "
-            "the model was fitted, or an older saved workspace was loaded. "
-            "Re-run the model in Tab 5.")
+            f"These results were fitted on columns that are not in the current dataset "
+            f"({', '.join(f'`{c}`' for c in missing[:8])}"
+            f"{' …' if len(missing) > 8 else ''}), so they can't be drawn. This usually means "
+            "the data was replaced, or an older saved workspace was loaded, after the model "
+            "was fitted. Re-run the model in Tab 5.")
         return
     if "a_params" not in res.get("params", {}):
         st.error(
