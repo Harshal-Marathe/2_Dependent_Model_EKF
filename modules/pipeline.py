@@ -427,11 +427,15 @@ def run_full_ekf_pipeline(df_full, config, max_iter, method, ng_cfg=None):
         # estimate AR(1) rho from the train residuals -> refit with the
         # quasi-differenced update -> repeat until rho stops moving.
         fit_state = {"success": True, "nit": 0}
+        base_state = {}          # the ordinary (rho = 0) fit = CO iteration 1
 
         def fit_fn(rhos, theta_init):
             g["CO_RHO"] = rhos[0]
             th, ok, nit = _fit(theta0 if theta_init is None else theta_init)
             fit_state["success"] = ok; fit_state["nit"] += nit
+            if "theta" not in base_state:       # iteration 1 -> keep as baseline
+                base_state.update(theta=np.array(th, dtype=float).copy(),
+                                  success=ok, nit=nit)
             return th
 
         def resid_fn(theta, rhos):
@@ -461,7 +465,27 @@ def run_full_ekf_pipeline(df_full, config, max_iter, method, ng_cfg=None):
     result["P_smooth"] = P_smooth
     if co_info is not None:
         result["co_info"] = _co_info_for_equation(co_info, 0)
+        if base_state.get("theta") is not None:
+            result["co_baseline"] = _univariate_baseline_result(
+                df_full, g, base_state, n_train)
     return result
+
+
+def _univariate_baseline_result(df_full, g, base_state, n_train):
+    """The model WITHOUT Cochrane-Orcutt, for the with/without comparison:
+    iteration 1 of the CO loop is the ordinary (rho = 0) fit, so its theta is
+    run through the same filter / smoother / post-processing as the final
+    model, only with rho forced to 0."""
+    g_b = dict(g); g_b["CO_RHO"] = 0.0; g_b["USE_COCHRANE_ORCUTT"] = False
+    p_b = unpack_theta(base_state["theta"], g_b)
+    sc = build_static_cache(df_full, g_b)
+    yhat, resid, xf, Pf, xp, Pp, Tm, cross, ll = run_kalman_filter(
+        df_full, p_b, g_b, static_cache=sc)
+    xs, _ = rts_smoother(xf, Pf, xp, Pp, Tm)
+    ads = _precompute_adstocked(df_full, g_b, p_b)
+    return _postprocess_equation(df_full, g_b, p_b, xs, ads, cross,
+                                 base_state["success"], base_state["nit"], ll,
+                                 n_train=n_train)
 
 
 def _co_info_for_equation(co_info, eq_idx):
@@ -727,11 +751,15 @@ def run_multi_dependent_pipeline(df_full, config, max_iter, method, ng_cfg=None)
         # kept separate from rho_y (correlation BETWEEN the two equations'
         # whitened shocks), which is still estimated inside theta_joint.
         fit_state = {"success": True, "nit": 0}
+        base_state = {}          # the ordinary (rho = 0) joint fit = CO iteration 1
 
         def fit_fn(rhos, theta_init):
             g1["CO_RHO"], g2["CO_RHO"] = rhos[0], rhos[1]
             th, ok, nit = _fit_joint(theta0_joint if theta_init is None else theta_init)
             fit_state["success"] = ok; fit_state["nit"] += nit
+            if "theta" not in base_state:
+                base_state.update(theta=np.array(th, dtype=float).copy(),
+                                  success=ok, nit=nit)
             return th
 
         def resid_fn(theta_joint, rhos):
@@ -788,6 +816,23 @@ def run_multi_dependent_pipeline(df_full, config, max_iter, method, ng_cfg=None)
     if co_info is not None:
         results_1["co_info"] = _co_info_for_equation(co_info, 0)
         results_2["co_info"] = _co_info_for_equation(co_info, 1)
+        if base_state.get("theta") is not None:
+            # Same joint model WITHOUT Cochrane-Orcutt (iteration 1, rho_AR = 0)
+            g1_b = dict(g1); g1_b["CO_RHO"] = 0.0; g1_b["USE_COCHRANE_ORCUTT"] = False
+            g2_b = dict(g2); g2_b["CO_RHO"] = 0.0; g2_b["USE_COCHRANE_ORCUTT"] = False
+            b1, b2, b_rho, b_ph1, b_ph2 = _split_joint(base_state["theta"])
+            bp1, bp2 = unpack_theta(b1, g1_b), unpack_theta(b2, g2_b)
+            (_, _, bxf, bPf, bxp, bPp, bTm, bc1, bc2, bll, bd1, bd2) = run_bivariate_kalman_filter(
+                df_full, bp1, g1_b, bp2, g2_b, b_rho, b_ph1, b_ph2,
+                static_cache1=build_static_cache(df_full, g1_b),
+                static_cache2=build_static_cache(df_full, g2_b))
+            bxs, _ = rts_smoother(bxf, bPf, bxp, bPp, bTm)
+            results_1["co_baseline"] = _postprocess_equation(
+                df_full, g1_b, bp1, bxs[:, :bd1], _precompute_adstocked(df_full, g1_b, bp1),
+                bc1, base_state["success"], base_state["nit"], bll, n_train=n_train)
+            results_2["co_baseline"] = _postprocess_equation(
+                df_full, g2_b, bp2, bxs[:, bd1:], _precompute_adstocked(df_full, g2_b, bp2),
+                bc2, base_state["success"], base_state["nit"], bll, n_train=n_train)
 
     for res in (results_1, results_2):
         res["rho_y"] = best_rho

@@ -490,6 +490,9 @@ def render_full_results(df, config, res, target, key_prefix="", pcb_key="per_cha
             "parameter layout, so they can't be displayed. Re-run the model in Tab 5.")
         return
 
+    from modules.co_compare import render_co_comparison
+    render_co_comparison(res, key_prefix=f"{kp}", x=None)
+
     st.markdown("### A · Model Performance")
     c1, c2, c3, c4 = st.columns(4)
     c1.metric("MAPE",         f"{res['mape']:.2%}")

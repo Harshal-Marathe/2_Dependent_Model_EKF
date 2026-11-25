@@ -34,6 +34,17 @@ def _patch_nevergrad_metamodel():
 
 
 _patch_nevergrad_metamodel()
+
+
+def _seed_nevergrad(optimizer, ng_cfg):
+    """Make a Nevergrad run reproducible: same seed + same settings + same
+    data -> the same model. ng_cfg["seed"] = None leaves it unseeded (random).
+    Candidates are asked sequentially and told back in order, so this also
+    holds with several workers."""
+    seed = (ng_cfg or {}).get("seed", None)
+    if seed is None:
+        return
+    optimizer.parametrization.random_state.seed(int(seed))
 from modules.bounds import build_normalized_problem
 from modules.kalman import (
     run_kalman_filter, run_bivariate_kalman_filter, build_static_cache,
@@ -139,6 +150,7 @@ def run_nevergrad_optimizer(df_train, g, theta0, bounds, ng_cfg, static_cache=No
     param = ng.p.Array(init=theta0_norm).set_bounds(lows, highs)
     optimizer_cls = getattr(ng.optimizers, strategy_name, None) or ng.optimizers.NGOpt
     optimizer = optimizer_cls(parametrization=param, budget=budget, num_workers=num_workers)
+    _seed_nevergrad(optimizer, ng_cfg)
 
     loss_fn = lambda theta_norm: _composite_loss(unscale(theta_norm), df_train, g, static_cache)
     best_theta_norm, best_loss = _ask_eval_tell_loop(
@@ -226,6 +238,7 @@ def run_nevergrad_optimizer_joint(df_train, g1, g2, theta0_joint, bounds_joint, 
     param = ng.p.Array(init=theta0_joint_norm).set_bounds(lows, highs)
     optimizer_cls = getattr(ng.optimizers, strategy_name, None) or ng.optimizers.NGOpt
     optimizer = optimizer_cls(parametrization=param, budget=budget, num_workers=num_workers)
+    _seed_nevergrad(optimizer, ng_cfg)
 
     loss_fn = lambda theta_joint_norm: _composite_loss_joint(
         unscale_joint(theta_joint_norm), df_train, g1, g2, n1, n2, static_cache1, static_cache2,

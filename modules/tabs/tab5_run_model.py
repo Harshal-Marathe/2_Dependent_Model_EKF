@@ -8,6 +8,7 @@ import streamlit as st
 
 from modules.ui_helpers import section, info, ng_info, prophet_info, need_data, need_config
 from modules.pipeline import run_multi_dependent_pipeline, run_chained_dependent_pipeline
+from modules.co_compare import render_co_comparison
 
 
 def _show_co_summary(r, label):
@@ -35,6 +36,7 @@ def _show_co_summary(r, label):
             f"(the value its parameters were actually fitted with); raise **Max CO "
             f"iterations** on the Configuration tab to keep iterating."
         )
+    render_co_comparison(r, key_prefix=f"t5_{label}_")
     with st.expander(f"🔁 Cochrane-Orcutt iterations · {label}"):
         hdf = pd.DataFrame(hist).rename(columns={
             "iteration": "Iter", "rho_used": "ρ used in fit", "rho_hat": "ρ̂ from residuals",
@@ -175,9 +177,15 @@ def render_tab5(nevergrad_available: bool):
         with ng_col2:
             ng_workers  = st.number_input("Parallel workers", 1, 8, 1, 1)
             max_iter    = ng_budget
+            ng_seed     = st.number_input(
+                "Random seed", 0, 2_147_483_647, 42, 1, key="ng_seed_input",
+                help="Nevergrad is a randomised search. With the same seed, the same "
+                     "settings and the same data you get exactly the same model every "
+                     "run. Change the seed to see how sensitive the result is to luck.")
 
         ng_cfg = {
             "strategy": ng_strategy, "budget": int(ng_budget), "num_workers": int(ng_workers),
+            "seed": int(ng_seed),
         }
     else:
         col1, _ = st.columns(2)
