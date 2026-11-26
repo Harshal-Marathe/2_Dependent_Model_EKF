@@ -1109,3 +1109,5 @@ def render_tab6():
 
     render_full_results(df, config, res, target, key_prefix="tab6_", pcb_key=pcb_key)
     _render_residual_refit_section(df, config, res, target, pcb_key)
+    from modules.tabs.ei_section import render_ei_section
+    render_ei_section(df, config, res, target, pcb_key)

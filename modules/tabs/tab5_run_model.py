@@ -196,6 +196,7 @@ def render_tab5(nevergrad_available: bool):
         st.session_state.last_fit_settings = {
             "max_iter": int(max_iter), "method": method, "ng_cfg": ng_cfg}
         st.session_state.residual_refit = None
+        st.session_state.ei_models = None
         joint_active = bool(config.get("enable_second_dependent") and config.get("target2"))
         chained_mode = joint_active and dep_relationship == "chained"
         spinner_text = (

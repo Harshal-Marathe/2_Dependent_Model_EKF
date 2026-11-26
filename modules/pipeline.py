@@ -383,11 +383,22 @@ def _postprocess_equation(df_full, g, params, x_smooth, adstocked_media,
 
 # ── Single-dependent-variable pipeline (univariate RBE) ──────────────────────
 
-def run_full_ekf_pipeline(df_full, config, max_iter, method, ng_cfg=None):
+def run_full_ekf_pipeline(df_full, config, max_iter, method, ng_cfg=None,
+                          theta_start=None, extra_loss=None):
+    """theta_start : optional warm start (e.g. a previous fit's result["theta"]).
+    extra_loss  : optional callable (theta, params, x_filtered_train) -> float
+                  added to -loglik while fitting (used by the EI refinement:
+                  a penalty on the channels' effectiveness index)."""
     g = _make_globals(config)
+    if extra_loss is not None:
+        g["EXTRA_LOSS"] = extra_loss
     n_train  = config["n_train"]
     df_train = df_full.iloc[:n_train].copy().reset_index(drop=True)
     theta0, bounds = _build_theta0_and_bounds(df_train, g)
+    if theta_start is not None and len(theta_start) == len(theta0):
+        lo = np.array([-np.inf if b[0] is None else b[0] for b in bounds], dtype=float)
+        hi = np.array([np.inf if b[1] is None else b[1] for b in bounds], dtype=float)
+        theta0 = np.clip(np.asarray(theta_start, dtype=float), lo, hi)
 
     # The observation matrix depends only on (df, g), never on the theta
     # being searched over — build it once per optimization run instead of
@@ -413,9 +424,12 @@ def run_full_ekf_pipeline(df_full, config, max_iter, method, ng_cfg=None):
         def objective(theta_norm):
             theta = unscale(theta_norm)
             p = unpack_theta(theta, g)
-            _, _, _, _, _, _, _, _, loglik = run_kalman_filter(
+            _, _, xf_tr, _, _, _, _, _, loglik = run_kalman_filter(
                 df_train, p, g, static_cache=static_cache_train)
-            return -loglik
+            loss = -loglik
+            if g.get("EXTRA_LOSS") is not None:
+                loss = loss + g["EXTRA_LOSS"](theta, p, xf_tr)
+            return loss
         opt = minimize(objective, theta0_norm, method=method,
                        bounds=norm_bounds,
                        options={"maxiter": max_iter, "ftol": 1e-9, "eps": 1e-6})
@@ -463,6 +477,7 @@ def run_full_ekf_pipeline(df_full, config, max_iter, method, ng_cfg=None):
         opt_success, opt_nit, loglik, n_train=n_train,
     )
     result["P_smooth"] = P_smooth
+    result["theta"] = np.asarray(best_theta, dtype=float).copy()
     if co_info is not None:
         result["co_info"] = _co_info_for_equation(co_info, 0)
         if base_state.get("theta") is not None:

@@ -55,9 +55,12 @@ from modules.kalman import (
 def _composite_loss(theta, df_train, g, static_cache=None):
     try:
         p = unpack_theta(theta, g)
-        _, _, _, _, _, _, _, _, loglik = run_kalman_filter(
+        _, _, xf_tr, _, _, _, _, _, loglik = run_kalman_filter(
             df_train, p, g, static_cache=static_cache)
-        return -loglik
+        loss = -loglik
+        if g.get("EXTRA_LOSS") is not None:      # e.g. EI-band penalty
+            loss = loss + g["EXTRA_LOSS"](theta, p, xf_tr)
+        return loss
     except Exception:
         return 1e12
 
