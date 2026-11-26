@@ -24,8 +24,11 @@ def _train_resid(res):
     return e[1:]          # t = 0 only reflects the initial-state guess
 
 
-def metrics_table(base, co):
-    """Fit quality / autocorrelation, without vs with CO."""
+LBL_CO = ("Without CO", "With CO")
+
+
+def metrics_table(base, co, lbl=LBL_CO, include_rho=True):
+    """Fit quality / autocorrelation, left (base) vs right (co) result."""
     def pct(x):
         return None if x is None or not np.isfinite(x) else float(x) * 100
     rows = [
@@ -39,10 +42,13 @@ def metrics_table(base, co):
     rows += [
         ("Residual lag-1 autocorrelation (train)", estimate_ar1_rho(eb), estimate_ar1_rho(ec), False),
         ("Durbin-Watson of residuals (train)",     durbin_watson(eb),    durbin_watson(ec),    False),
-        ("AR(1) ρ used in the fit", 0.0, float(co["g"].get("CO_RHO", 0.0) or 0.0), False),
     ]
-    out = pd.DataFrame(rows, columns=["Metric", "Without CO", "With CO", "_lower_better"])
-    out["Change"] = out["With CO"].astype(float) - out["Without CO"].astype(float)
+    if include_rho:
+        rows.append(("AR(1) ρ used in the fit",
+                     float(base["g"].get("CO_RHO", 0.0) or 0.0),
+                     float(co["g"].get("CO_RHO", 0.0) or 0.0), False))
+    out = pd.DataFrame(rows, columns=["Metric", lbl[0], lbl[1], "_lower_better"])
+    out["Change"] = out[lbl[1]].astype(float) - out[lbl[0]].astype(float)
     return out.drop(columns="_lower_better")
 
 
@@ -59,7 +65,7 @@ def _components(res):
     return comp, float(np.nansum(cd[tgt].values))
 
 
-def decomposition_table(base, co):
+def decomposition_table(base, co, lbl=LBL_CO):
     cb, tb = _components(base)
     cc, tc = _components(co)
     names = list(dict.fromkeys(list(cb) + list(cc)))
@@ -69,44 +75,107 @@ def decomposition_table(base, co):
         sb = b / tb * 100 if tb else np.nan
         sc = c / tc * 100 if tc else np.nan
         rows.append({"Component": n,
-                     "Contribution (without CO)": b, "Contribution (with CO)": c,
-                     "Share % (without CO)": sb, "Share % (with CO)": sc,
+                     f"Contribution ({lbl[0]})": b, f"Contribution ({lbl[1]})": c,
+                     f"Share % ({lbl[0]})": sb, f"Share % ({lbl[1]})": sc,
                      "Δ share (pp)": sc - sb})
     out = pd.DataFrame(rows)
-    out["_k"] = out[["Share % (without CO)", "Share % (with CO)"]].abs().max(axis=1)
+    out["_k"] = out[[f"Share % ({lbl[0]})", f"Share % ({lbl[1]})"]].abs().max(axis=1)
     return out.sort_values("_k", ascending=False).drop(columns="_k").reset_index(drop=True)
 
 
-def roi_table(base, co):
+def roi_table(base, co, lbl=LBL_CO):
+    a, b = f"ROI ({lbl[0]})", f"ROI ({lbl[1]})"
     m = base["roi_df"][["Channel", "ROI"]].merge(
         co["roi_df"][["Channel", "ROI"]], on="Channel", how="outer",
-        suffixes=(" (without CO)", " (with CO)"))
-    m["Δ ROI"] = m["ROI (with CO)"] - m["ROI (without CO)"]
-    m["Δ ROI %"] = np.where(m["ROI (without CO)"].abs() > 1e-12,
-                            m["Δ ROI"] / m["ROI (without CO)"].abs() * 100, np.nan)
+        suffixes=(f" ({lbl[0]})", f" ({lbl[1]})"))
+    m["Δ ROI"] = m[b] - m[a]
+    m["Δ ROI %"] = np.where(m[a].abs() > 1e-12, m["Δ ROI"] / m[a].abs() * 100, np.nan)
     return m
 
 
-def param_table(base, co):
+def param_table(base, co, lbl=LBL_CO):
     k = ["Category", "Variable", "Parameter"]
+    a, b = f"Value ({lbl[0]})", f"Value ({lbl[1]})"
     m = base["param_df"][k + ["Value"]].merge(
         co["param_df"][k + ["Value"]], on=k, how="outer",
-        suffixes=(" (without CO)", " (with CO)"))
-    for c in ("Value (without CO)", "Value (with CO)"):
+        suffixes=(f" ({lbl[0]})", f" ({lbl[1]})"))
+    for c in (a, b):
         m[c] = pd.to_numeric(m[c], errors="coerce")
-    m["Δ"] = m["Value (with CO)"] - m["Value (without CO)"]
-    den = m["Value (without CO)"].abs().where(lambda s: s > 1e-9)
+    m["Δ"] = m[b] - m[a]
+    den = m[a].abs().where(lambda s: s > 1e-9)
     m["Δ %"] = m["Δ"] / den * 100
     return m.reindex(m["Δ %"].abs().sort_values(ascending=False, na_position="last").index
                      ).reset_index(drop=True)
 
 
 # ── view ─────────────────────────────────────────────────────────────
+def render_pair(base, res, lbl, key_prefix="", x=None, include_rho=True, file_stub="comparison"):
+    """Tables + charts comparing two results of the same dependent variable."""
+    import streamlit as st
+    import plotly.graph_objects as go
+
+    a, b = lbl
+    st.markdown("**Fit quality & residual autocorrelation**")
+    mt = metrics_table(base, res, lbl, include_rho)
+    st.dataframe(mt.style.format({a: "{:.4f}", b: "{:.4f}", "Change": "{:+.4f}"}, na_rep="–"),
+                 use_container_width=True, hide_index=True)
+
+    dec = decomposition_table(base, res, lbl)
+    st.markdown("**Contribution — how the KPI is split**")
+    st.dataframe(dec.style.format({
+        f"Contribution ({a})": "{:,.0f}", f"Contribution ({b})": "{:,.0f}",
+        f"Share % ({a})": "{:.2f}", f"Share % ({b})": "{:.2f}",
+        "Δ share (pp)": "{:+.2f}"}, na_rep="–"),
+        use_container_width=True, hide_index=True)
+    top = dec.head(12)
+    fig = go.Figure()
+    fig.add_trace(go.Bar(x=top["Component"], y=top[f"Share % ({a})"], name=a,
+                         marker_color="#9ca3af"))
+    fig.add_trace(go.Bar(x=top["Component"], y=top[f"Share % ({b})"], name=b,
+                         marker_color="#4f46e5"))
+    fig.update_layout(barmode="group", height=380, title="Share of KPI by component (%)",
+                      margin=dict(l=10, r=10, t=50, b=10), legend=dict(orientation="h", y=-0.35))
+    st.plotly_chart(fig, use_container_width=True, key=f"{key_prefix}cmp_share")
+
+    st.markdown("**ROI**")
+    rt = roi_table(base, res, lbl)
+    st.dataframe(rt.style.format({
+        f"ROI ({a})": "{:.4f}", f"ROI ({b})": "{:.4f}",
+        "Δ ROI": "{:+.4f}", "Δ ROI %": "{:+.1f}%"}, na_rep="–"),
+        use_container_width=True, hide_index=True)
+
+    tgt = res["contrib_df"].columns[0]
+    xs = x if x is not None and len(x) == len(res["yhat_smooth"]) else np.arange(len(res["yhat_smooth"]))
+    f2 = go.Figure()
+    f2.add_trace(go.Scatter(x=xs, y=res["contrib_df"][tgt].values, name="Actual",
+                            line=dict(color="#111827", width=2)))
+    f2.add_trace(go.Scatter(x=xs, y=base["yhat_smooth"], name=f"Fitted · {a}",
+                            line=dict(color="#9ca3af", width=2, dash="dot")))
+    f2.add_trace(go.Scatter(x=xs, y=res["yhat_smooth"], name=f"Fitted · {b}",
+                            line=dict(color="#4f46e5", width=2)))
+    f2.update_layout(height=380, title="Actual vs fitted", margin=dict(l=10, r=10, t=50, b=10),
+                     legend=dict(orientation="h", y=-0.25))
+    st.plotly_chart(f2, use_container_width=True, key=f"{key_prefix}cmp_fit")
+
+    with st.expander("Parameter changes (largest relative change first)"):
+        pt = param_table(base, res, lbl)
+        st.dataframe(pt.style.format({
+            f"Value ({a})": "{:.5g}", f"Value ({b})": "{:.5g}",
+            "Δ": "{:+.5g}", "Δ %": "{:+.1f}%"}, na_rep="–"),
+            use_container_width=True, hide_index=True, height=420)
+
+    buf = []
+    for name, d in (("metrics", mt), ("contribution", dec), ("roi", rt)):
+        d2 = d.copy(); d2.insert(0, "Table", name); buf.append(d2)
+    st.download_button("⬇ Download comparison (CSV)",
+                       pd.concat(buf, ignore_index=True).to_csv(index=False).encode(),
+                       f"{file_stub}.csv", "text/csv", key=f"{key_prefix}cmp_dl")
+
+
 def render_co_comparison(res, key_prefix="", x=None, expanded=False):
     """Expander showing the with-vs-without-CO comparison for one result.
     No-op if the model wasn't fitted with CO (no baseline stored)."""
     import streamlit as st
-    import plotly.graph_objects as go
 
     base = res.get("co_baseline")
     if not base or not res.get("co_info"):
@@ -116,73 +185,9 @@ def render_co_comparison(res, key_prefix="", x=None, expanded=False):
         st.caption(
             f"“Without CO” is the ordinary fit (ρ = 0, iteration 1 of the CO loop, same "
             f"data/config/start values). “With CO” is the final model fitted with ρ = {rho:.3f}. "
-            "Everything is on the original (non-differenced) scale.")
-
-        # 1 · fit quality
-        st.markdown("**Fit quality & residual autocorrelation**")
-        mt = metrics_table(base, res)
-        st.dataframe(mt.style.format({"Without CO": "{:.4f}", "With CO": "{:.4f}",
-                                      "Change": "{:+.4f}"}, na_rep="–"),
-                     use_container_width=True, hide_index=True)
-        st.caption("CO's job is to reduce autocorrelation in the errors, so look at the "
-                   "lag-1 autocorrelation moving toward 0 (Durbin-Watson toward 2). Accuracy "
-                   "(MAPE / R²) may go up or down slightly. Log-likelihood isn't compared: "
-                   "the CO likelihood is on the whitened scale, so the two aren't comparable.")
-
-        # 2 · where the KPI is attributed
-        dec = decomposition_table(base, res)
-        st.markdown("**Contribution — how CO shifts the split of the KPI**")
-        st.dataframe(dec.style.format({
-            "Contribution (without CO)": "{:,.0f}", "Contribution (with CO)": "{:,.0f}",
-            "Share % (without CO)": "{:.2f}", "Share % (with CO)": "{:.2f}",
-            "Δ share (pp)": "{:+.2f}"}, na_rep="–"),
-            use_container_width=True, hide_index=True)
-        top = dec.head(12)
-        fig = go.Figure()
-        fig.add_trace(go.Bar(x=top["Component"], y=top["Share % (without CO)"],
-                             name="Without CO", marker_color="#9ca3af"))
-        fig.add_trace(go.Bar(x=top["Component"], y=top["Share % (with CO)"],
-                             name="With CO", marker_color="#4f46e5"))
-        fig.update_layout(barmode="group", height=380, title="Share of KPI by component (%)",
-                          margin=dict(l=10, r=10, t=50, b=10),
-                          legend=dict(orientation="h", y=-0.35))
-        st.plotly_chart(fig, use_container_width=True, key=f"{key_prefix}co_cmp_share")
-
-        # 3 · ROI
-        st.markdown("**ROI**")
-        rt = roi_table(base, res)
-        st.dataframe(rt.style.format({
-            "ROI (without CO)": "{:.4f}", "ROI (with CO)": "{:.4f}",
-            "Δ ROI": "{:+.4f}", "Δ ROI %": "{:+.1f}%"}, na_rep="–"),
-            use_container_width=True, hide_index=True)
-
-        # 4 · fitted vs actual
-        tgt = res["contrib_df"].columns[0]
-        xs = x if x is not None and len(x) == len(res["yhat_smooth"]) else np.arange(len(res["yhat_smooth"]))
-        f2 = go.Figure()
-        f2.add_trace(go.Scatter(x=xs, y=res["contrib_df"][tgt].values, name="Actual",
-                                line=dict(color="#111827", width=2)))
-        f2.add_trace(go.Scatter(x=xs, y=base["yhat_smooth"], name="Fitted · without CO",
-                                line=dict(color="#9ca3af", width=2, dash="dot")))
-        f2.add_trace(go.Scatter(x=xs, y=res["yhat_smooth"], name="Fitted · with CO",
-                                line=dict(color="#4f46e5", width=2)))
-        f2.update_layout(height=380, title="Actual vs fitted", margin=dict(l=10, r=10, t=50, b=10),
-                         legend=dict(orientation="h", y=-0.25))
-        st.plotly_chart(f2, use_container_width=True, key=f"{key_prefix}co_cmp_fit")
-
-        # 5 · parameters
-        with st.expander("Parameter changes (largest relative change first)"):
-            pt = param_table(base, res)
-            st.dataframe(pt.style.format({
-                "Value (without CO)": "{:.5g}", "Value (with CO)": "{:.5g}",
-                "Δ": "{:+.5g}", "Δ %": "{:+.1f}%"}, na_rep="–"),
-                use_container_width=True, hide_index=True, height=420)
-
-        # download
-        buf = []
-        for name, d in (("metrics", mt), ("contribution", dec), ("roi", rt)):
-            d2 = d.copy(); d2.insert(0, "Table", name); buf.append(d2)
-        st.download_button("⬇ Download comparison (CSV)",
-                           pd.concat(buf, ignore_index=True).to_csv(index=False).encode(),
-                           "cochrane_orcutt_comparison.csv", "text/csv",
-                           key=f"{key_prefix}co_cmp_dl")
+            "Everything is on the original (non-differenced) scale. CO's job is to reduce "
+            "autocorrelation in the errors, so look at the lag-1 autocorrelation moving toward 0 "
+            "(Durbin-Watson toward 2). Log-likelihood isn't compared: the CO likelihood is on the "
+            "whitened scale, so the two aren't comparable.")
+        render_pair(base, res, LBL_CO, key_prefix=f"{key_prefix}co_", x=x,
+                    include_rho=True, file_stub="cochrane_orcutt_comparison")

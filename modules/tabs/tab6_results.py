@@ -983,6 +983,67 @@ def render_full_results(df, config, res, target, key_prefix="", pcb_key="per_cha
         )
 
 
+def _render_residual_refit_section(df, config, res, target, pcb_key):
+    """Fit → take the residuals → add them as a variable → re-estimate everything."""
+    from modules.residual_refit import run_residual_refit, RESID_COL
+    from modules.co_compare import render_pair
+
+    # Only for a single-equation model of Dependent 1 (a joint/second-dependent
+    # fit can't be re-run one equation at a time without changing the model).
+    if res.get("joint_fit") or target != config.get("target"):
+        return
+    st.divider()
+    st.markdown("### 🔂 Residual as a variable — fit, take the errors, re-estimate")
+    st.caption(
+        "Stage 1 is the model above. Its residuals are added to the data as one more "
+        f"variable (`{RESID_COL}`) and the **whole model is re-estimated from scratch** — "
+        "every coefficient and hyper-parameter is refitted.")
+    st.warning(
+        "Heads-up: a same-period residual is calculated from the KPI itself, so the new fit "
+        "will look almost perfect (R² ≈ 1, MAPE ≈ 0) without being genuinely more predictive, "
+        "and part of the KPI is credited to “residual” instead of baseline/media. Use the "
+        "comparison below to see how the media coefficients and ROI actually move. "
+        "The residual isn't known in the future, so this model can't be used to forecast.")
+
+    c1, c2 = st.columns([2, 1])
+    lag_choice = c1.radio(
+        "Which residual?", ["Same period  e(t)", "Previous period  e(t−1)"],
+        horizontal=True, key="tab6_resid_lag")
+    lag = 0 if lag_choice.startswith("Same") else 1
+    run = c2.button("▶ Re-estimate with residual", type="primary",
+                    use_container_width=True, key="tab6_resid_run")
+
+    sig = (target, round(float(res.get("loglik", 0.0)), 6), lag)
+    if run:
+        s = st.session_state.get("last_fit_settings") or {}
+        with st.spinner("Re-estimating every coefficient with the residual included… (30–300 s)"):
+            try:
+                df2, cfg2, res2 = run_residual_refit(
+                    df, config, res, lag,
+                    s.get("max_iter", 800), s.get("method", "L-BFGS-B"), s.get("ng_cfg"))
+                st.session_state.residual_refit = {
+                    "df": df2, "cfg": cfg2, "res": res2, "sig": sig, "lag": lag}
+            except Exception as e:
+                st.session_state.residual_refit = None
+                st.error(f"Re-estimation failed: {e}")
+
+    rr = st.session_state.get("residual_refit")
+    if not rr or rr["sig"][:2] != sig[:2]:
+        return
+    if rr["sig"] != sig:
+        st.info("Showing the result for the other residual choice — click the button to refit "
+                "with the one selected above.")
+    lbl = ("Stage 1 (no residual)", "Stage 2 (with residual)")
+    n_lag = "e(t)" if rr["lag"] == 0 else "e(t−1)"
+    st.success(f"Stage 2 fitted with `{RESID_COL}` = {n_lag} as a variable. "
+               "All parameters were re-estimated.")
+    render_pair(res, rr["res"], lbl, key_prefix="tab6rr_", include_rho=False,
+                file_stub="residual_refit_comparison")
+    with st.expander("📊 Full results of the Stage 2 model", expanded=False):
+        render_full_results(rr["df"], rr["cfg"], rr["res"], target,
+                            key_prefix="tab6rr_full_", pcb_key=pcb_key)
+
+
 def render_tab6():
     section("06", "Results & ROI Analytics")
     if not st.session_state.model_fitted: need_model()
@@ -1047,3 +1108,4 @@ def render_tab6():
         target = config["target"]
 
     render_full_results(df, config, res, target, key_prefix="tab6_", pcb_key=pcb_key)
+    _render_residual_refit_section(df, config, res, target, pcb_key)

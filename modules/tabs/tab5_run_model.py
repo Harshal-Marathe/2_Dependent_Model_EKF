@@ -192,6 +192,10 @@ def render_tab5(nevergrad_available: bool):
         with col1: max_iter = st.number_input("Max iterations", 100, 5000, 800, 100)
 
     if st.button("🚀 Run RBE MMM", type="primary", use_container_width=True):
+        # remembered so Tab 6's "residual as a variable" re-fit uses the same optimiser setup
+        st.session_state.last_fit_settings = {
+            "max_iter": int(max_iter), "method": method, "ng_cfg": ng_cfg}
+        st.session_state.residual_refit = None
         joint_active = bool(config.get("enable_second_dependent") and config.get("target2"))
         chained_mode = joint_active and dep_relationship == "chained"
         spinner_text = (
