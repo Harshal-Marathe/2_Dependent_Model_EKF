@@ -101,6 +101,49 @@ def render_ei_section(df, config, res, target, pcb_key=None):
         if do_sd:
             st.caption(f"This will run about {n_fits} refit(s).")
 
+    # ── 4 · run every model in one pass ────────────────────────────
+    st.markdown("#### ⚡ Run all models at once")
+    st.caption("Runs every ticked model in one go. Each one then appears in the model chooser at "
+               "the top of the page, so you can switch between them without pressing each button. "
+               "Uses the bands, strength and sweep settings above.")
+    run_pick = st.multiselect("Models to run", list(E.ALL_MODEL_LABELS),
+                              default=list(E.ALL_MODEL_LABELS),
+                              format_func=lambda k: E.ALL_MODEL_LABELS[k], key="ei_all_pick")
+    sw_grid = list(np.arange(sw_lo, sw_hi + 1e-9, sw_st)) if auto else [float(tgt_pct)]
+    n_all = E.count_fits(run_pick, len(sw_grid))
+    st.caption(f"About {n_all} full refit(s) in total — each takes roughly 30–300 s, so this can "
+               "take a while. Leave the page open until it finishes.")
+    if st.button("▶ Run all selected models", type="primary", use_container_width=True,
+                 key="ei_all_run", disabled=not run_pick):
+        s = st.session_state.get("last_fit_settings") or {}
+        mi, me, ng = s.get("max_iter", 800), s.get("method", "L-BFGS-B"), s.get("ng_cfg")
+        slot = st.empty()
+        soft_cfg = dict(mode="soft", strength=strength, differentiate=diff,
+                        diff_strength=diff_strength, gap=gap)
+        hard_cfg = dict(soft_cfg, mode="hard")
+        sd_cfg = dict(funnel_weights=fw, differentiate=sdiff, gap=sgap, tol_pct=tol,
+                      strength=max(strength, 1.0), auto_tune=auto, grid=sw_grid,
+                      target_pct=tgt_pct, sensitivity=False, sens_grid=[10, 20, 30, 40, 50, 60])
+        sig_all = (target, round(float(res.get("loglik", 0.0)), 6))
+        ok = False
+        try:
+            models = E.run_all_models(df, config, res, lo, hi, soft_cfg, hard_cfg, sd_cfg,
+                                      set(run_pick), mi, me, ng,
+                                      progress=lambda m: slot.info(m))
+            co = models.pop("co", None)
+            st.session_state.ei_all = {"sig": sig_all, "models": models}
+            if co:
+                st.session_state.residual_refit = {
+                    "df": co["df"], "cfg": co["cfg"], "res": co["res"],
+                    "sig": (target, sig_all[1], 0), "lag": 0}
+            st.session_state["_tab6_pick_next"] = "co" if co else next(iter(models), "none")
+            ok = True
+        except Exception as e:
+            st.session_state.ei_all = None
+            slot.error(f"Run-all failed: {e}")
+        if ok:
+            st.rerun()
+
     if not (do_ref or do_sd):
         st.info("Tick at least one option above, then run.")
         return

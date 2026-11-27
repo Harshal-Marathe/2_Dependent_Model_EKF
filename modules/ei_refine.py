@@ -235,3 +235,73 @@ def ei_table(res, lo=None, hi=None, base=None):
         out["In band?"] = ["✓" if (np.isfinite(e) and a - 0.005 <= e <= b + 0.005) else "✗"
                            for e, a, b in zip(ei, lo, hi)]
     return out.sort_values("Spend share %", ascending=False, ignore_index=True)
+
+
+# ── run every model in one pass ──────────────────────────────────────
+ALL_MODEL_LABELS = {
+    "ei_soft":      "EI refinement · soft prior",
+    "ei_hard":      "EI refinement · hard band",
+    "spend_flat":   "Spend-distributed · flat",
+    "spend_funnel": "Spend-distributed · funnel-weighted",
+    "co":           "Cochrane-Orcutt · residual re-estimation",
+}
+
+
+def count_fits(which, grid_len):
+    """Rough number of full refits a run-all selection will perform."""
+    n = 0
+    n += 1 if "ei_soft" in which else 0
+    n += 1 if "ei_hard" in which else 0
+    n += grid_len * (("spend_flat" in which) + ("spend_funnel" in which))
+    n += 1 if "co" in which else 0
+    return n
+
+
+def run_all_models(df, config, base, lo, hi, soft_cfg, hard_cfg, sd_cfg, which,
+                   max_iter, method, ng_cfg=None, progress=None):
+    """Run every model in `which` once and return {key: entry}.
+
+    Each entry has title, desc, res, lo, hi. Spend variants also carry the
+    tuning sweep. The 'co' entry carries df, cfg, res (residual re-estimation)
+    instead of bands, so the caller can store it in residual_refit."""
+    from modules.residual_refit import run_residual_refit
+
+    say = progress or (lambda m: None)
+    lo = np.asarray(lo, float); hi = np.asarray(hi, float)
+    out = {}
+
+    if "ei_soft" in which:
+        say(f"{ALL_MODEL_LABELS['ei_soft']}…")
+        r = run_refinement(df, config, base, (lo, hi), soft_cfg, max_iter, method, ng_cfg)
+        out["ei_soft"] = dict(title=ALL_MODEL_LABELS["ei_soft"],
+                              desc="Each channel's effectiveness index pulled into its band (soft prior), then refit.",
+                              res=r["res"], lo=lo, hi=hi)
+
+    if "ei_hard" in which:
+        say(f"{ALL_MODEL_LABELS['ei_hard']}…")
+        r = run_refinement(df, config, base, (lo, hi), hard_cfg, max_iter, method, ng_cfg)
+        out["ei_hard"] = dict(title=ALL_MODEL_LABELS["ei_hard"],
+                              desc="Each channel's effectiveness index clamped strictly into its band, then refit.",
+                              res=r["res"], lo=lo, hi=hi)
+
+    for key, funnel, desc in (
+        ("spend_flat", False, "Media split by share of spend, equal weights — an assumption, not a finding."),
+        ("spend_funnel", True, "Media split by share of spend, weighted by funnel position — an assumption, not a finding."),
+    ):
+        if key not in which:
+            continue
+        say(f"{ALL_MODEL_LABELS[key]}…")
+        r = run_spend_distributed(df, config, base, (lo, hi),
+                                  dict(sd_cfg, funnel_weights=funnel, sensitivity=False),
+                                  max_iter, method, ng_cfg, progress=say)
+        m = r["model"]
+        out[key] = dict(title=ALL_MODEL_LABELS[key], desc=desc, res=m["res"], lo=m["lo"], hi=m["hi"],
+                        sweep=r["sweep"], chosen_pct=m["chosen_pct"])
+
+    if "co" in which:
+        say(f"{ALL_MODEL_LABELS['co']}…")
+        df2, cfg2, res2 = run_residual_refit(df, config, base, 0, max_iter, method, ng_cfg)
+        out["co"] = dict(title=ALL_MODEL_LABELS["co"],
+                         desc="Fitted, then the residuals were added as a variable and every coefficient was re-estimated.",
+                         df=df2, cfg=cfg2, res=res2, lo=None, hi=None)
+    return out

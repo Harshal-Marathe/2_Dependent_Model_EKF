@@ -1026,6 +1026,13 @@ def _collect_models(df, config, res, target):
                 desc="Media contribution split by share of spend — an assumption, not a finding.",
                 df=df, cfg=config, res=em["spend"]["res"],
                 lo=em["spend"]["lo"], hi=em["spend"]["hi"])
+    ea = st.session_state.get("ei_all")
+    if ea and ea.get("sig") == sig:
+        for k, v in ea["models"].items():
+            if k == "co":          # residual model is stored in residual_refit above
+                continue
+            ms[k] = dict(title=v["title"], desc=v["desc"], df=df, cfg=config,
+                         res=v["res"], lo=v["lo"], hi=v["hi"])
     return ms
 
 
@@ -1061,15 +1068,16 @@ def _render_model_chooser(df, config, res, target):
     pick = st.radio("Model", keys, key="tab6_model_pick", label_visibility="collapsed",
                     format_func=lambda k: f"{ms[k]['title']}   —   {_sum(ms[k]['res'])}",
                     captions=[ms[k]["desc"] for k in keys])
-    missing = [t for k, t in (("co", "Cochrane-Orcutt · residual re-estimation"),
-                              ("refined", "EI refinement"),
-                              ("spend", "Spend-distributed media")) if k not in ms]
+    families = [(("co",), "Cochrane-Orcutt · residual re-estimation"),
+                (("refined", "ei_soft", "ei_hard"), "EI refinement"),
+                (("spend", "spend_flat", "spend_funnel"), "Spend-distributed media")]
+    missing = [label for keys, label in families if not any(k in ms for k in keys)]
     if missing:
         st.caption("Not run yet: " + ", ".join(missing) + " — run them in the sections at the "
                    "bottom of this page and they will appear here.")
 
     m = ms[pick]
-    if pick == "spend":
+    if pick.startswith("spend"):
         st.warning("Spend-distributed media is an assumption imposed on the model (effect share "
                    "≈ spend share). Say so when you present it. A lower R² than the solver's "
                    "own fit is expected — it's the price of the constraint.")
@@ -1080,7 +1088,7 @@ def _render_model_chooser(df, config, res, target):
     if pick not in ("none", "plain") and len(res["roi_df"]) >= 2:
         tbl = E.ei_table(m["res"], m["lo"], m["hi"], base=res)
         with st.expander("Effectiveness index (EI) by channel — this model vs the solver's own fit",
-                         expanded=pick in ("refined", "spend")):
+                         expanded=pick in ("refined", "spend", "ei_soft", "ei_hard", "spend_flat", "spend_funnel")):
             st.dataframe(tbl.style.format({
                 "Spend share %": "{:.2f}", "Effect share %": "{:.2f}", "EI": "{:.3f}",
                 "ROI": "{:.4f}", "EI (solver's own fit)": "{:.3f}"}, na_rep="–"),
