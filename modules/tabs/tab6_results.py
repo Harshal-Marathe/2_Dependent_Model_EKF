@@ -505,7 +505,7 @@ def render_full_results(df, config, res, target, key_prefix="", pcb_key="per_cha
     _co = res.get("co_info")
     if _co:
         st.caption(
-            f"🔁 Cochrane-Orcutt AR(1) correction applied: ρ = {_co['rho']:.3f} "
+            f"🔁 Classical Cochrane-Orcutt applied (AR(1) errors): ρ = {_co['rho']:.3f} "
             f"({'converged' if _co['converged'] else 'iteration limit reached'} after "
             f"{_co['n_iter']} iteration(s)). Fitted values, contributions and ROI are on "
             f"the original (non-differenced) scale."
@@ -983,6 +983,119 @@ def render_full_results(df, config, res, target, key_prefix="", pcb_key="per_cha
         )
 
 
+def _collect_models(df, config, res, target):
+    """Every complete model available for the chooser, in display order."""
+    is_ar1 = bool(res.get("co_info")) and bool(res.get("co_baseline")) and \
+        not (res.get("joint_fit") or target != config.get("target"))
+    if is_ar1:
+        ms = {"none": dict(
+            title="Classical Cochrane-Orcutt",
+            desc="Fitted with the classical quasi-differenced error correction (ρ re-estimated "
+                 "until it settles).",
+            df=df, cfg=config, res=res, lo=None, hi=None),
+              "plain": dict(
+            title="Without Cochrane-Orcutt",
+            desc="The ordinary fit (ρ = 0) — iteration 1 of the Cochrane-Orcutt loop, same data and settings.",
+            df=df, cfg=config, res=res["co_baseline"], lo=None, hi=None)}
+    else:
+        ms = {"none": dict(
+            title="Without refinement",
+            desc="The solver's own fit, exactly as fitted in Tab 6.",
+            df=df, cfg=config, res=res, lo=None, hi=None)}
+    if res.get("joint_fit") or target != config.get("target"):
+        return ms
+    sig = (target, round(float(res.get("loglik", 0.0)), 6))
+    rr = st.session_state.get("residual_refit")
+    if rr and rr["sig"][:2] == sig:
+        ms["co"] = dict(
+            title="Cochrane-Orcutt · residual re-estimation",
+            desc="Fitted, then the residuals were added as a variable and every coefficient "
+                 "was re-estimated.",
+            df=rr["df"], cfg=rr["cfg"], res=rr["res"], lo=None, hi=None)
+    em = st.session_state.get("ei_models")
+    if em and em.get("sig") == sig:
+        if "refined" in em:
+            ms["refined"] = dict(
+                title="EI refinement",
+                desc="Each channel's effectiveness index pulled into its band, then refit.",
+                df=df, cfg=config, res=em["refined"]["res"],
+                lo=em["refined"]["lo"], hi=em["refined"]["hi"])
+        if "spend" in em:
+            ms["spend"] = dict(
+                title="Spend-distributed media",
+                desc="Media contribution split by share of spend — an assumption, not a finding.",
+                df=df, cfg=config, res=em["spend"]["res"],
+                lo=em["spend"]["lo"], hi=em["spend"]["hi"])
+    return ms
+
+
+def _render_model_chooser(df, config, res, target):
+    """Radio at the top of the page: every view below is one complete model."""
+    from modules import ei_refine as E
+    from modules.co_compare import render_pair, LBL_CO
+
+    ms = _collect_models(df, config, res, target)
+    single = not res.get("joint_fit") and target == config.get("target")
+    if len(ms) == 1:
+        if single:
+            st.caption("🧭 More models appear here once you run them at the bottom of this "
+                       "page: Cochrane-Orcutt (residual re-estimation), EI refinement and "
+                       "spend-distributed media.")
+        return "none", df, config, res
+
+    def _sum(r):
+        return (f"R² {r['r2'] * 100:.2f}%  ·  MAPE {r['mape'] * 100:.2f}%  ·  "
+                f"Media {E.media_pct_of_kpi(r):.1f}%")
+
+    st.markdown("#### Choose the model you want to see")
+    st.caption("Every view below is a complete model. Switching changes the tables, the charts "
+               "and every download together — they never mix.")
+    keys = list(ms)
+    # A run further down the page asks (via _tab6_pick_next) to switch to the model it just
+    # created. Streamlit only lets us set a widget's value BEFORE it is drawn, so do it here.
+    _nxt = st.session_state.pop("_tab6_pick_next", None)
+    if _nxt in keys:
+        st.session_state["tab6_model_pick"] = _nxt
+    elif st.session_state.get("tab6_model_pick") not in keys:
+        st.session_state["tab6_model_pick"] = keys[0]
+    pick = st.radio("Model", keys, key="tab6_model_pick", label_visibility="collapsed",
+                    format_func=lambda k: f"{ms[k]['title']}   —   {_sum(ms[k]['res'])}",
+                    captions=[ms[k]["desc"] for k in keys])
+    missing = [t for k, t in (("co", "Cochrane-Orcutt · residual re-estimation"),
+                              ("refined", "EI refinement"),
+                              ("spend", "Spend-distributed media")) if k not in ms]
+    if missing:
+        st.caption("Not run yet: " + ", ".join(missing) + " — run them in the sections at the "
+                   "bottom of this page and they will appear here.")
+
+    m = ms[pick]
+    if pick == "spend":
+        st.warning("Spend-distributed media is an assumption imposed on the model (effect share "
+                   "≈ spend share). Say so when you present it. A lower R² than the solver's "
+                   "own fit is expected — it's the price of the constraint.")
+    if pick == "co":
+        st.warning("The residual is calculated from the KPI itself, so this model's fit is "
+                   "partly circular and it can't be used to forecast. Judge it by how the media "
+                   "coefficients and ROI move — see the comparison below.")
+    if pick not in ("none", "plain") and len(res["roi_df"]) >= 2:
+        tbl = E.ei_table(m["res"], m["lo"], m["hi"], base=res)
+        with st.expander("Effectiveness index (EI) by channel — this model vs the solver's own fit",
+                         expanded=pick in ("refined", "spend")):
+            st.dataframe(tbl.style.format({
+                "Spend share %": "{:.2f}", "Effect share %": "{:.2f}", "EI": "{:.3f}",
+                "ROI": "{:.4f}", "EI (solver's own fit)": "{:.3f}"}, na_rep="–"),
+                use_container_width=True, hide_index=True)
+            st.download_button("⬇ Download EI table (CSV)", tbl.to_csv(index=False).encode(),
+                               f"ei_table_{pick}.csv", "text/csv", key=f"tab6_ei_dl_{pick}")
+    if pick == "co":
+        from modules.residual_refit import plain_result
+        with st.expander("Compare with the model without CO", expanded=True):
+            render_pair(plain_result(res), m["res"], LBL_CO, key_prefix="tab6_chooser_co_",
+                        include_rho=False, file_stub="cochrane_orcutt_residual_comparison")
+    st.divider()
+    return pick, m["df"], m["cfg"], m["res"]
+
+
 def _render_residual_refit_section(df, config, res, target, pcb_key):
     """Fit → take the residuals → add them as a variable → re-estimate everything."""
     from modules.residual_refit import run_residual_refit, RESID_COL
@@ -993,7 +1106,7 @@ def _render_residual_refit_section(df, config, res, target, pcb_key):
     if res.get("joint_fit") or target != config.get("target"):
         return
     st.divider()
-    st.markdown("### 🔂 Residual as a variable — fit, take the errors, re-estimate")
+    st.markdown("### 🔂 Cochrane-Orcutt — fit, add the residuals as a variable, re-estimate")
     st.caption(
         "Stage 1 is the model above. Its residuals are added to the data as one more "
         f"variable (`{RESID_COL}`) and the **whole model is re-estimated from scratch** — "
@@ -1006,9 +1119,11 @@ def _render_residual_refit_section(df, config, res, target, pcb_key):
         "The residual isn't known in the future, so this model can't be used to forecast.")
 
     c1, c2 = st.columns([2, 1])
+    from modules.co_methods import co_methods as _co_methods
+    _default_lag = int(config.get("co_resid_lag", 0)) if "residual" in _co_methods(config) else 0
     lag_choice = c1.radio(
         "Which residual?", ["Same period  e(t)", "Previous period  e(t−1)"],
-        horizontal=True, key="tab6_resid_lag")
+        index=_default_lag, horizontal=True, key="tab6_resid_lag")
     lag = 0 if lag_choice.startswith("Same") else 1
     run = c2.button("▶ Re-estimate with residual", type="primary",
                     use_container_width=True, key="tab6_resid_run")
@@ -1023,9 +1138,14 @@ def _render_residual_refit_section(df, config, res, target, pcb_key):
                     s.get("max_iter", 800), s.get("method", "L-BFGS-B"), s.get("ng_cfg"))
                 st.session_state.residual_refit = {
                     "df": df2, "cfg": cfg2, "res": res2, "sig": sig, "lag": lag}
+                st.session_state["_tab6_pick_next"] = "co"   # show it in the chooser
+                ok = True
             except Exception as e:
                 st.session_state.residual_refit = None
                 st.error(f"Re-estimation failed: {e}")
+                ok = False
+        if ok:
+            st.rerun()          # refresh the chooser at the top of the page
 
     rr = st.session_state.get("residual_refit")
     if not rr or rr["sig"][:2] != sig[:2]:
@@ -1033,15 +1153,11 @@ def _render_residual_refit_section(df, config, res, target, pcb_key):
     if rr["sig"] != sig:
         st.info("Showing the result for the other residual choice — click the button to refit "
                 "with the one selected above.")
-    lbl = ("Stage 1 (no residual)", "Stage 2 (with residual)")
     n_lag = "e(t)" if rr["lag"] == 0 else "e(t−1)"
-    st.success(f"Stage 2 fitted with `{RESID_COL}` = {n_lag} as a variable. "
-               "All parameters were re-estimated.")
-    render_pair(res, rr["res"], lbl, key_prefix="tab6rr_", include_rho=False,
-                file_stub="residual_refit_comparison")
-    with st.expander("📊 Full results of the Stage 2 model", expanded=False):
-        render_full_results(rr["df"], rr["cfg"], rr["res"], target,
-                            key_prefix="tab6rr_full_", pcb_key=pcb_key)
+    st.success(f"Cochrane-Orcutt model fitted with `{RESID_COL}` = {n_lag} as a variable — all "
+               "parameters re-estimated. Pick **Cochrane-Orcutt (residual re-estimation)** in "
+               "the model chooser at the top of this page to see it, with the comparison "
+               "against the model without CO.")
 
 
 def render_tab6():
@@ -1107,7 +1223,12 @@ def render_tab6():
         res    = st.session_state.model_results
         target = config["target"]
 
-    render_full_results(df, config, res, target, key_prefix="tab6_", pcb_key=pcb_key)
+    # ── Model chooser (top of the page) ─────────────────────────────
+    pick, m_df, m_cfg, m_res = _render_model_chooser(df, config, res, target)
+    render_full_results(m_df, m_cfg, m_res, target,
+                        key_prefix="tab6_" if pick == "none" else f"tab6_{pick}_",
+                        pcb_key=pcb_key)
+    # Sections that CREATE the extra models (they appear in the chooser above)
     _render_residual_refit_section(df, config, res, target, pcb_key)
     from modules.tabs.ei_section import render_ei_section
     render_ei_section(df, config, res, target, pcb_key)

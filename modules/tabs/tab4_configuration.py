@@ -737,10 +737,14 @@ def render_tab4():
     # modules/cochrane_orcutt.py for the full derivation.
     st.markdown("#### Autocorrelated Errors — Cochrane-Orcutt (optional)")
     use_cochrane_orcutt = st.checkbox(
-        "Fit with Cochrane-Orcutt AR(1) error correction",
+        "Fit with Cochrane-Orcutt (error correction)",
         value=False,
         key="use_cochrane_orcutt_chk",
         help=(
+            "Pick the method below. **Residual re-estimation**: fit the model, take its "
+            "residuals, add them to the data as one more variable and re-estimate every "
+            "coefficient. **Classical Cochrane-Orcutt**: estimate ρ (AR(1) errors), "
+            "quasi-difference the equation and refit, described next.\n\n"
             "The standard filter assumes each period's observation error is "
             "independent. If the errors are serially correlated "
             "(ε_t = ρ·ε_{t-1} + u_t) the flexible baseline / betas end up "
@@ -755,7 +759,32 @@ def render_tab4():
         ),
     )
     co_max_iter, co_tol, co_keep_first_obs = 5, 0.01, True
+    co_methods_sel, co_resid_lag = [], 0
+    _OPT_AR1 = "Classical Cochrane-Orcutt — estimate ρ (AR(1) errors), quasi-difference, refit"
+    _OPT_RES = "Residual re-estimation — fit, add the residuals as a variable, re-estimate everything"
     if use_cochrane_orcutt:
+        _co_pick = st.multiselect(
+            "Cochrane-Orcutt method(s) — pick either or both",
+            [_OPT_AR1, _OPT_RES], default=[_OPT_RES], key="co_methods_multi",
+            help="Both can be run in the same model run. Each becomes its own complete model "
+                 "in the model chooser at the top of the Results page, next to the model "
+                 "without Cochrane-Orcutt, so you can compare them side by side.")
+        co_methods_sel = (["ar1"] if _OPT_AR1 in _co_pick else []) + \
+                         (["residual"] if _OPT_RES in _co_pick else [])
+        if not co_methods_sel:
+            st.warning("Pick at least one method, or untick Cochrane-Orcutt — with none selected "
+                       "the model is fitted without any correction.")
+        if "residual" in co_methods_sel:
+            _co_l = st.radio("Which residual is added as a variable?",
+                             ["Same period  e(t)", "Previous period  e(t−1)"],
+                             horizontal=True, key="co_resid_lag_radio")
+            co_resid_lag = 0 if _co_l.startswith("Same") else 1
+            st.caption("The model is fitted once, its residuals become a variable called "
+                       "`Model_Residual`, and the whole model is re-estimated with it. The "
+                       "results page then lets you compare it with the model without CO. "
+                       "A same-period residual is computed from the KPI itself, so expect a "
+                       "near-perfect fit that isn't real predictive power.")
+    if use_cochrane_orcutt and "ar1" in co_methods_sel:
         co_c1, co_c2 = st.columns(2)
         with co_c1:
             co_max_iter = int(st.number_input(
@@ -1088,6 +1117,9 @@ def render_tab4():
                 "cross_intercept_coupling_mode": cross_intercept_coupling_mode_str,
                 "loss_function_mode": loss_function_mode_str,
                 "use_cochrane_orcutt": bool(use_cochrane_orcutt),
+                "co_methods": list(co_methods_sel),
+                "co_method": ("residual" if co_methods_sel == ["residual"] else "ar1"),  # legacy key
+                "co_resid_lag": int(co_resid_lag),
                 "co_max_iter": int(co_max_iter),
                 "co_tol": float(co_tol),
                 "co_keep_first_obs": bool(co_keep_first_obs),
@@ -1137,9 +1169,16 @@ def render_tab4():
                     f"📌 Prophet controls included in model: "
                     f"<b>{', '.join(prophet_in_model)}</b>"
                 )
-            if use_cochrane_orcutt:
+            if use_cochrane_orcutt and "residual" in co_methods_sel:
                 st.info(
-                    f"🔁 **Cochrane-Orcutt AR(1) correction ON** — up to {co_max_iter} "
+                    "🔁 **Cochrane-Orcutt ON (residual re-estimation"
+                    f"{' + classical Cochrane-Orcutt' if 'ar1' in co_methods_sel else ''})** — the model is "
+                    f"fitted, its {'same-period' if co_resid_lag == 0 else 'previous-period'} "
+                    "residuals are added as a variable, and everything is re-estimated."
+                )
+            if use_cochrane_orcutt and "ar1" in co_methods_sel:
+                st.info(
+                    f"🔁 **Classical Cochrane-Orcutt ON** — up to {co_max_iter} "
                     f"iterations, ρ tolerance {co_tol:g}, first observation "
                     f"{'kept (Prais-Winsten)' if co_keep_first_obs else 'dropped (classical CO)'}."
                 )

@@ -9,6 +9,7 @@ import streamlit as st
 from modules.ui_helpers import section, info, ng_info, prophet_info, need_data, need_config
 from modules.pipeline import run_multi_dependent_pipeline, run_chained_dependent_pipeline
 from modules.co_compare import render_co_comparison
+from modules.co_methods import co_methods
 
 
 def _show_co_summary(r, label):
@@ -88,9 +89,18 @@ def render_tab5(nevergrad_available: bool):
         n_pcb = sum(len(v) for v in pcb.values())
         st.info(f"🎛️ Per-variable bounds: {len(pcb)} channel(s), {n_pcb} params")
 
-    if config.get("use_cochrane_orcutt"):
+    _cms = co_methods(config)
+    if "residual" in _cms:
         st.info(
-            f"🔁 **Cochrane-Orcutt AR(1) correction is ON** — the model will be fitted "
+            "🔁 **Cochrane-Orcutt is ON (residual re-estimation"
+            f"{' + classical Cochrane-Orcutt' if 'ar1' in _cms else ''})** — the model is fitted, its "
+            "residuals are added as a variable, and everything is re-estimated, so expect extra "
+            "run time. Every method's model is available in the model chooser at the top of "
+            "the Results page, next to the model without Cochrane-Orcutt."
+        )
+    if "ar1" in _cms:
+        st.info(
+            f"🔁 **Classical Cochrane-Orcutt is ON** — the model will be fitted "
             f"up to {config.get('co_max_iter', 5)} times (ρ re-estimated from the "
             f"residuals each round, tolerance {config.get('co_tol', 0.01):g}), so expect "
             f"roughly that multiple of the normal run time. Change it in the "
@@ -204,8 +214,11 @@ def render_tab5(nevergrad_available: bool):
             "Running joint bivariate RBE optimisation… (60–600 s)" if joint_active else
             "Running RBE optimisation… (30–300 s)"
         )
-        if config.get("use_cochrane_orcutt"):
-            spinner_text += f"  [Cochrane-Orcutt: up to {config.get('co_max_iter', 5)} rounds]"
+        _cms_run = co_methods(config)
+        if "ar1" in _cms_run:
+            spinner_text += f"  [Classical Cochrane-Orcutt: up to {config.get('co_max_iter', 5)} rounds]"
+        if "residual" in _cms_run:
+            spinner_text += "  [+ residual re-estimation]"
         with st.spinner(spinner_text):
             try:
                 if chained_mode:
@@ -254,6 +267,29 @@ def render_tab5(nevergrad_available: bool):
                 st.session_state.refit_config  = None
                 st.session_state.refit_result  = None
                 st.session_state.refit_history = []
+
+                # Cochrane-Orcutt, residual method: stage 1 (above) is the model without
+                # CO; now add its residuals as a variable and re-estimate everything.
+                if "residual" in co_methods(config):
+                    if results_2 is None:
+                        with st.spinner("Cochrane-Orcutt: re-estimating with the residuals "
+                                        "as a variable…"):
+                            try:
+                                from modules.residual_refit import run_residual_refit
+                                _lag = int(config.get("co_resid_lag", 0))
+                                # residuals of the model WITHOUT CO (the AR(1) baseline if
+                                # AR(1) was also run) — handled inside run_residual_refit
+                                _df2, _cfg2, _res2 = run_residual_refit(
+                                    df, config, results_1, _lag, max_iter, method, ng_cfg)
+                                st.session_state.residual_refit = {
+                                    "df": _df2, "cfg": _cfg2, "res": _res2, "lag": _lag,
+                                    "sig": (config["target"],
+                                            round(float(results_1.get("loglik", 0.0)), 6), _lag)}
+                            except Exception as _e:
+                                st.warning(f"Cochrane-Orcutt re-estimation failed: {_e}")
+                    else:
+                        st.info("Residual-based Cochrane-Orcutt is available for a single "
+                                "dependent variable; it was skipped for this two-dependent fit.")
 
                 st.success("✅ Model fitted!")
                 st.markdown(f"#### Dependent 1 · `{config['target']}`")

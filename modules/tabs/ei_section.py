@@ -18,8 +18,6 @@ def _summary(res):
 
 
 def render_ei_section(df, config, res, target, pcb_key=None):
-    from modules.tabs.tab6_results import render_full_results
-
     if res.get("joint_fit") or target != config.get("target"):
         return
     g = res["g"]; cols = list(g["MEDIA_COLS"])
@@ -129,57 +127,27 @@ def render_ei_section(df, config, res, target, pcb_key=None):
                                             progress=lambda m: slot.info(m))
                 out["spend"] = r["model"]; out["sweep"] = r["sweep"]; out["sens"] = r["sens"]
             st.session_state.ei_models = out
-            slot.success("Done.")
+            st.session_state["_tab6_pick_next"] = "spend" if "spend" in out else "refined"
+            ok = True
         except Exception as e:
             st.session_state.ei_models = None
             slot.error(f"Refinement failed: {e}")
+            ok = False
+        if ok:
+            st.rerun()          # refresh the model chooser at the top of the page
 
     em = st.session_state.get("ei_models")
     if not em or em.get("sig") != sig:
         return
 
-    # ── 4 · choose the model you want to see ───────────────────────
-    st.markdown("#### Choose the model you want to see")
-    st.caption("Every view below is a complete model. Switching changes the table, the charts "
-               "and every download together — they never mix.")
-    options = {}
+    st.success("Refinement done — pick **EI refinement** or **Spend-distributed media** in the "
+               "model chooser at the top of this page to see each as a complete model.")
     if "spend" in em:
-        options["spend"] = ("Spend-distributed media", _summary(em["spend"]["res"]),
-                            "Media contribution split by share of spend — an assumption, not a finding.")
-    if "refined" in em:
-        options["refined"] = ("EI refinement", _summary(em["refined"]["res"]),
-                              "Each channel's EI pulled into its band, then refit.")
-    options["none"] = ("Without refinement", _summary(res),
-                       "The solver's own fit, exactly as shown above.")
-    pick = st.radio("Model", list(options), format_func=lambda k: f"{options[k][0]}   —   {options[k][1]}",
-                    captions=[options[k][2] for k in options], key="ei_pick",
-                    label_visibility="collapsed")
-
-    if pick == "none":
-        m_res, m_lo, m_hi = res, lo, hi
-    else:
-        m = em[pick]; m_res, m_lo, m_hi = m["res"], m["lo"], m["hi"]
-    if pick == "spend":
-        st.warning("Spend-distributed media is an assumption imposed on the model (effect share "
-                   "≈ spend share). Say so when you present it. A lower R² than the solver's own "
-                   "fit is expected — it's the price of the constraint.")
-
-    tbl = E.ei_table(m_res, m_lo, m_hi, base=res)
-    st.dataframe(tbl.style.format({"Spend share %": "{:.2f}", "Effect share %": "{:.2f}",
-                                   "EI": "{:.3f}", "ROI": "{:.4f}",
-                                   "EI (solver's own fit)": "{:.3f}"}, na_rep="–"),
-                 use_container_width=True, hide_index=True)
-    st.download_button("⬇ Download EI table (CSV)", tbl.to_csv(index=False).encode(),
-                       f"ei_table_{pick}.csv", "text/csv", key=f"ei_dl_{pick}")
-
-    if pick == "spend":
-        st.markdown(f"**Target total media tuned to {em['spend'].get('chosen_pct', 0):g}% of sales** "
-                    "(applied to the training-window direct contribution; the achieved media % "
-                    "of the final smoothed model is in the table below).")
-        st.dataframe(em["sweep"].round(2), use_container_width=True, hide_index=True)
-        if em.get("sens") is not None:
-            st.markdown("**Media-budget sensitivity**")
-            st.dataframe(em["sens"].round(2), use_container_width=True, hide_index=True)
-
-    with st.expander("📊 Full results of this model", expanded=False):
-        render_full_results(df, config, m_res, target, key_prefix=f"ei_{pick}_", pcb_key=pcb_key)
+        with st.expander("Spend-distributed tuning details", expanded=False):
+            st.markdown(f"**Target total media tuned to {em['spend'].get('chosen_pct', 0):g}% of "
+                        "sales** (applied to the training-window direct contribution; the "
+                        "achieved media % of the final smoothed model is in the table).")
+            st.dataframe(em["sweep"].round(2), use_container_width=True, hide_index=True)
+            if em.get("sens") is not None:
+                st.markdown("**Media-budget sensitivity**")
+                st.dataframe(em["sens"].round(2), use_container_width=True, hide_index=True)

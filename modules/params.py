@@ -113,7 +113,15 @@ def _make_globals(cfg: dict):
     # 0.0 (= ordinary white-noise filter, identical to pre-CO behaviour);
     # modules/cochrane_orcutt.py::run_cochrane_orcutt updates it between
     # fits. modules/kalman.py reads it. See modules/cochrane_orcutt.py.
-    g["USE_COCHRANE_ORCUTT"] = bool(cfg.get("use_cochrane_orcutt", False))
+    # "Cochrane-Orcutt" has two methods (Tab 4): "residual" = fit, add the
+    # residuals as a variable, re-estimate (done by modules/residual_refit.py
+    # after the fit — the filter itself is the ordinary one), and "ar1" =
+    # the quasi-differenced AR(1) loop below. Configs saved before the choice
+    # existed have no co_method and keep the old AR(1) behaviour.
+    from modules.co_methods import co_methods as _co_methods
+    _cm = _co_methods(cfg)
+    g["CO_METHODS"] = _cm
+    g["USE_COCHRANE_ORCUTT"] = "ar1" in _cm      # only the AR(1) loop changes the filter
     g["CO_MAX_ITER"]         = int(cfg.get("co_max_iter", 5))
     g["CO_TOL"]              = float(cfg.get("co_tol", 0.01))
     g["CO_KEEP_FIRST"]       = bool(cfg.get("co_keep_first_obs", True))  # True: Prais-Winsten first row; False: classical CO (drop it)

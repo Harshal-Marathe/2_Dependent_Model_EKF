@@ -23,6 +23,12 @@ from modules.refit import add_variable_to_config
 RESID_COL = "Model_Residual"
 
 
+def plain_result(res):
+    """The model WITHOUT Cochrane-Orcutt. If `res` was fitted with the AR(1)
+    loop, that is its stored ρ = 0 baseline fit; otherwise `res` itself."""
+    return res.get("co_baseline") or res
+
+
 def residual_series(res, lag=0):
     e = np.asarray(res["residuals"], dtype=float).copy()
     e = np.nan_to_num(e, nan=0.0)
@@ -43,11 +49,15 @@ def build_residual_dataset(df, config, res, lag=0, col=RESID_COL):
         cfg2 = dict(config)
     else:
         cfg2 = add_variable_to_config(config, col, "non_media", None, "instant")
+    # Stage 2 is the residual method ALONE: never run the AR(1) loop inside it.
+    cfg2["co_methods"] = ["residual"]
+    cfg2["co_method"] = "residual"
     return df2, cfg2
 
 
 def run_residual_refit(df, config, res, lag, max_iter, method, ng_cfg=None, col=RESID_COL):
     """Fit stage 2 from scratch on (df + residual). Returns (df2, cfg2, res2)."""
+    res = plain_result(res)            # residuals of the model without CO
     df2, cfg2 = build_residual_dataset(df, config, res, lag, col)
     res2 = run_full_ekf_pipeline(df2, cfg2, max_iter, method, ng_cfg=ng_cfg)
     return df2, cfg2, res2
