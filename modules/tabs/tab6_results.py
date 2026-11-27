@@ -505,7 +505,7 @@ def render_full_results(df, config, res, target, key_prefix="", pcb_key="per_cha
     _co = res.get("co_info")
     if _co:
         st.caption(
-            f"🔁 Classical Cochrane-Orcutt applied (AR(1) errors): ρ = {_co['rho']:.3f} "
+            f"🔁 Cochrane-Orcutt AR(1) correction applied: ρ = {_co['rho']:.3f} "
             f"({'converged' if _co['converged'] else 'iteration limit reached'} after "
             f"{_co['n_iter']} iteration(s)). Fitted values, contributions and ROI are on "
             f"the original (non-differenced) scale."
@@ -989,13 +989,13 @@ def _collect_models(df, config, res, target):
         not (res.get("joint_fit") or target != config.get("target"))
     if is_ar1:
         ms = {"none": dict(
-            title="Classical Cochrane-Orcutt",
-            desc="Fitted with the classical quasi-differenced error correction (ρ re-estimated "
+            title="Cochrane-Orcutt · classical AR(1)",
+            desc="Fitted with the quasi-differenced AR(1) error correction (ρ re-estimated "
                  "until it settles).",
             df=df, cfg=config, res=res, lo=None, hi=None),
               "plain": dict(
             title="Without Cochrane-Orcutt",
-            desc="The ordinary fit (ρ = 0) — iteration 1 of the Cochrane-Orcutt loop, same data and settings.",
+            desc="The ordinary fit (ρ = 0) — iteration 1 of the AR(1) loop, same data and settings.",
             df=df, cfg=config, res=res["co_baseline"], lo=None, hi=None)}
     else:
         ms = {"none": dict(

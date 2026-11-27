@@ -93,14 +93,14 @@ def render_tab5(nevergrad_available: bool):
     if "residual" in _cms:
         st.info(
             "🔁 **Cochrane-Orcutt is ON (residual re-estimation"
-            f"{' + classical Cochrane-Orcutt' if 'ar1' in _cms else ''})** — the model is fitted, its "
+            f"{' + classical AR(1)' if 'ar1' in _cms else ''})** — the model is fitted, its "
             "residuals are added as a variable, and everything is re-estimated, so expect extra "
             "run time. Every method's model is available in the model chooser at the top of "
             "the Results page, next to the model without Cochrane-Orcutt."
         )
     if "ar1" in _cms:
         st.info(
-            f"🔁 **Classical Cochrane-Orcutt is ON** — the model will be fitted "
+            f"🔁 **Cochrane-Orcutt AR(1) correction is ON** — the model will be fitted "
             f"up to {config.get('co_max_iter', 5)} times (ρ re-estimated from the "
             f"residuals each round, tolerance {config.get('co_tol', 0.01):g}), so expect "
             f"roughly that multiple of the normal run time. Change it in the "
@@ -216,7 +216,7 @@ def render_tab5(nevergrad_available: bool):
         )
         _cms_run = co_methods(config)
         if "ar1" in _cms_run:
-            spinner_text += f"  [Classical Cochrane-Orcutt: up to {config.get('co_max_iter', 5)} rounds]"
+            spinner_text += f"  [Cochrane-Orcutt AR(1): up to {config.get('co_max_iter', 5)} rounds]"
         if "residual" in _cms_run:
             spinner_text += "  [+ residual re-estimation]"
         with st.spinner(spinner_text):

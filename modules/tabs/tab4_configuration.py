@@ -743,8 +743,7 @@ def render_tab4():
         help=(
             "Pick the method below. **Residual re-estimation**: fit the model, take its "
             "residuals, add them to the data as one more variable and re-estimate every "
-            "coefficient. **Classical Cochrane-Orcutt**: estimate ρ (AR(1) errors), "
-            "quasi-difference the equation and refit, described next.\n\n"
+            "coefficient. **AR(1) quasi-differencing**: the classical loop described next.\n\n"
             "The standard filter assumes each period's observation error is "
             "independent. If the errors are serially correlated "
             "(ε_t = ρ·ε_{t-1} + u_t) the flexible baseline / betas end up "
@@ -760,7 +759,7 @@ def render_tab4():
     )
     co_max_iter, co_tol, co_keep_first_obs = 5, 0.01, True
     co_methods_sel, co_resid_lag = [], 0
-    _OPT_AR1 = "Classical Cochrane-Orcutt — estimate ρ (AR(1) errors), quasi-difference, refit"
+    _OPT_AR1 = "Classical (AR(1)) — estimate ρ, quasi-difference, refit"
     _OPT_RES = "Residual re-estimation — fit, add the residuals as a variable, re-estimate everything"
     if use_cochrane_orcutt:
         _co_pick = st.multiselect(
@@ -1172,13 +1171,13 @@ def render_tab4():
             if use_cochrane_orcutt and "residual" in co_methods_sel:
                 st.info(
                     "🔁 **Cochrane-Orcutt ON (residual re-estimation"
-                    f"{' + classical Cochrane-Orcutt' if 'ar1' in co_methods_sel else ''})** — the model is "
+                    f"{' + classical AR(1)' if 'ar1' in co_methods_sel else ''})** — the model is "
                     f"fitted, its {'same-period' if co_resid_lag == 0 else 'previous-period'} "
                     "residuals are added as a variable, and everything is re-estimated."
                 )
             if use_cochrane_orcutt and "ar1" in co_methods_sel:
                 st.info(
-                    f"🔁 **Classical Cochrane-Orcutt ON** — up to {co_max_iter} "
+                    f"🔁 **Cochrane-Orcutt AR(1) correction ON** — up to {co_max_iter} "
                     f"iterations, ρ tolerance {co_tol:g}, first observation "
                     f"{'kept (Prais-Winsten)' if co_keep_first_obs else 'dropped (classical CO)'}."
                 )
